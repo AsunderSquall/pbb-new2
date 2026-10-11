@@ -402,6 +402,8 @@ class Monitor(tk.Tk):
         self._theme_checkbuttons: list[tk.Checkbutton] = []
         # 滚轮绑定去重表: canvas id -> 已绑定的控件 id 集合（见 _bind_wheel 的幂等说明）
         self._wheel_bound: dict[str, set[str]] = {}
+        # canvas -> 它的滚动条（见 _setup_scrollbar / _sync_scrollbar）
+        self._scrollbars: dict[str, tk.Scrollbar] = {}
         # 行容器 -> 承载它的 canvas（见 _canvas_of）
         self._scroll_canvases: dict[str, tk.Canvas] = {}
         self._editor_canvases: list[tk.Canvas] = []
@@ -550,9 +552,11 @@ class Monitor(tk.Tk):
         score_view.pack(fill="both", expand=True)
         self.score_canvas = tk.Canvas(score_view, highlightthickness=0)
         score_scrollbar = ttk.Scrollbar(score_view, orient="vertical", command=self.score_canvas.yview)
-        self.score_canvas.configure(yscrollcommand=score_scrollbar.set)
-        score_scrollbar.pack(side="right", fill="y")
         self.score_canvas.pack(side="left", fill="both", expand=True)
+        score_scrollbar.pack(side="right", fill="y")
+        # 内容不足一屏时自动隐藏滚动条（见 _setup_scrollbar）
+        self._scrollbars[str(self.score_canvas)] = score_scrollbar
+        self._setup_scrollbar(self.score_canvas, score_scrollbar)
         self.score_area = ttk.Frame(self.score_canvas)
         self.score_window = self.score_canvas.create_window((0, 0), window=self.score_area, anchor="nw")
         self.score_area.bind("<Configure>", self._sync_score_scroll)
@@ -788,6 +792,79 @@ class Monitor(tk.Tk):
                 index += 1
         return ranges
 
+    def _sync_all_scrollbars(self, _event=None):
+        """重新判断所有已登记的 canvas 是否需要滚动条。
+
+        两个触发时机缺一不可：
+          * 切换 Notebook 标签页（``<<NotebookTabChanged>>``）—— Tk 不映射非当前页里的
+            控件，此时 winfo_height() 为 1，判断结果不可信；切回来必须重算。
+          * canvas 被映射（``<Map>``）。
+        """
+        for canvas in list(self._scroll_canvases.values()) + [self.score_canvas]:
+            try:
+                if canvas.winfo_exists():
+                    self._sync_scrollbar(canvas)
+            except Exception:
+                pass
+
+    def _setup_scrollbar(self, canvas, scrollbar):
+        """登记 canvas↔scrollbar，并让滚动条在「内容不足一屏」时自动隐藏。
+
+        **为什么需要**：canvas 的滚动条常驻时，即使内容只有两三行也会显示一条（且拖不动、
+        滚轮也没反应），看起来像界面出了问题。惯例做法是内容放不下才显示。
+
+        ``yscrollcommand`` 必须走 ``_on_canvas_scrolled``：它先让 Tk 更新滑块位置
+        （``scrollbar.set``），再判断是否需要隐藏。顺序不能反 —— 隐藏/显示会改变
+        canvas 宽度，进而可能触发重排，必须放在位置更新之后。
+
+        隐藏用 ``pack_forget`` 而不是 ``grid_remove``：三处滚动条都是用 pack 放进
+        viewport 的，重新显示时要插回 canvas 之后（用 ``after=canvas`` 保证仍在右侧）。
+        """
+        canvas.configure(yscrollcommand=lambda first, last: self._on_canvas_scrolled(
+            canvas, scrollbar, first, last))
+        # 尺寸变化与被映射时都要重算（<Map> 覆盖"切到该标签页/窗口首次显示"）
+        canvas.bind("<Configure>", lambda _e, c=canvas: self._sync_scrollbar(c), add="+")
+        canvas.bind("<Map>", lambda _e, c=canvas: self._sync_scrollbar(c), add="+")
+        scrollbar.bind("<Configure>", lambda _e, c=canvas: self._sync_scrollbar(c), add="+")
+
+    def _canvas_can_scroll(self, canvas) -> bool:
+        """内容是否超出可视高度（超出才需要滚动条/滚轮）。"""
+        try:
+            region = canvas.bbox("all")
+            if not region:
+                return False
+            return (region[3] - region[1]) > canvas.winfo_height()
+        except Exception:
+            return False
+
+    def _sync_scrollbar(self, canvas):
+        """按「内容是否放得下」显示或隐藏该 canvas 的滚动条。
+
+        判据用 ``winfo_manager()`` 而不是 ``winfo_ismapped()``：后者在窗口**未映射**时
+        恒为假（例如窗口最小化、或在 Notebook 的非当前页里），会让"隐藏"分支永远不执行，
+        滚动条就一直留着 —— 这正是"内容没占满也有滚动条"的原因之一。
+        ``winfo_manager()`` 直接反映当前由哪个几何管理器管理（``""`` 表示已 forget），
+        与是否可见无关。
+        """
+        scrollbar = self._scrollbars.get(str(canvas))
+        if scrollbar is None or not scrollbar.winfo_exists():
+            return
+        packed = bool(scrollbar.winfo_manager())
+        if self._canvas_can_scroll(canvas):
+            if not packed:
+                scrollbar.pack(side="right", fill="y", after=canvas)
+        else:
+            if packed:
+                scrollbar.pack_forget()
+
+    def _on_canvas_scrolled(self, canvas, scrollbar, first, last):
+        """canvas 的 yscrollcommand：先更新滑块，再决定滚动条是否显示。"""
+        try:
+            scrollbar.set(first, last)
+        except Exception:
+            return
+        self._sync_scrollbar(canvas)
+
     def _create_scrollable_editor_section(self, parent, title: str, height: int = 230):
         section = ttk.LabelFrame(parent, text=title, padding=10)
         viewport = ttk.Frame(section)
@@ -796,10 +873,13 @@ class Monitor(tk.Tk):
         scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
         rows = ttk.Frame(canvas)
         window = canvas.create_window((0, 0), window=rows, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        rows.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        self._scrollbars[str(canvas)] = scrollbar
+        self._setup_scrollbar(canvas, scrollbar)
+        # scrollregion 变化后也要重算滚动条可见性（内容增删就走这条路径）
+        rows.bind("<Configure>", lambda _event: (
+            canvas.configure(scrollregion=canvas.bbox("all")), self._sync_scrollbar(canvas)))
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
         self._editor_canvases.append(canvas)
         # 登记 rows→canvas 映射，供新增行后重绑滚轮（_canvas_of）
@@ -869,6 +949,8 @@ class Monitor(tk.Tk):
         * ``ttk.Combobox`` 的滚轮用于切换选项，交给它自己，不接管。
         * ``state="disabled"`` 的 ``tk.Text``（例如排行榜里的 Top 5 只读框）纵向本来
           就不滚，应当把滚轮完全让给外层 —— 这也是"鼠标放进文字框滚轮就失效"的根因。
+        * **外层滚不动时不接管滚轮**（返回 ``None``）：内容不足一屏时滚动条已隐藏，
+          此时继续"吃掉"滚轮事件会让人以为界面卡住；交给更外层（若有）更自然。
         """
         def scroll_units(event):
             """把 Windows 的 wheel delta 换算成滚动行数（delta=120 即一行）。"""
@@ -876,7 +958,9 @@ class Monitor(tk.Tk):
             return -steps if steps else (-1 if event.delta < 0 else 1)
 
         def scroll_outer(event):
-            """显式滚动外层 canvas（替代依赖事件冒泡的做法）。"""
+            """滚动外层 canvas；滚不动就不接管，让事件继续传给更外层。"""
+            if not self._canvas_can_scroll(canvas):
+                return None
             canvas.yview_scroll(scroll_units(event), "units")
             return "break"
 
@@ -1261,13 +1345,18 @@ class Monitor(tk.Tk):
         notebook.add(affixes, text="前后缀")
         notebook.add(scores, text="评分")
         notebook.add(output, text="输出")
+        # 切页后要重算滚动条：Tk 不会映射非当前页里的控件（winfo_height() 为 1），
+        # 仅靠 <Configure> 不足以保证切回来时状态正确。
+        notebook.bind("<<NotebookTabChanged>>", self._sync_all_scrollbars)
         self.editor_vars = {}
         self.editor_choice_maps = {}
         self._editor_canvases = []
-        # 上一次编辑器窗口的 canvas/控件已随窗口销毁，映射必须一起清空，
-        # 否则会持有失效控件引用。
-        self._scroll_canvases = {}
-        self._wheel_bound = {}
+        # 上一次编辑器窗口的 canvas/控件已随窗口销毁，相关映射必须清空，否则会持有
+        # 失效控件引用。但主窗口排行榜的登记要保留 —— 它仍然活着。
+        score_id = str(getattr(self, "score_canvas", ""))
+        self._scroll_canvases = {k: v for k, v in self._scroll_canvases.items() if k == score_id}
+        self._scrollbars = {k: v for k, v in self._scrollbars.items() if k == score_id}
+        self._wheel_bound = {k: v for k, v in self._wheel_bound.items() if k == score_id}
         self.prefix_rows = []
         self.suffix_rows = []
         self.pair_rows = []

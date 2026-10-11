@@ -330,6 +330,84 @@ class AffixEditorTests(unittest.TestCase):
         # 向下滚一格：-delta 120 -> 参数 (1, "units")
         self.assertEqual(calls[0], (1, "units"))
 
+    # 内容不足一屏时必须隐藏滚动条、且滚轮不接管事件。
+    #
+    # 背景：滚动条常驻时，内容只有两三行也会显示一条（还拖不动、滚轮没反应），
+    # 看起来像界面坏了。惯例是放不下才显示。
+    # 用一个全新的 canvas 测，避免受夹具里既有行内容的影响。
+    def test_scrollbar_auto_hides_with_content(self):
+        import tkinter as tk
+        holder = tk.Frame(self.app)
+        # 显式几何：测试窗口常常没有被真正映射，此时 canvas 高度会是 1，
+        # "内容是否放得下"的判断就失去意义。给 holder 一个确定的高度。
+        holder.place(x=0, y=0, width=400, height=200)
+        canvas = tk.Canvas(holder, height=200)
+        scrollbar = ui.ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.app._scrollbars[str(canvas)] = scrollbar
+        self.app._setup_scrollbar(canvas, scrollbar)
+        self.app.update_idletasks()
+        self.assertGreater(canvas.winfo_height(), 50,
+                           "canvas 未获得有效高度，测试前提不成立")
+        # 先同步一次：真实程序里靠事件触发，测试里得主动来一次
+        self.app._sync_scrollbar(canvas)
+        self.app.update_idletasks()
+
+        # 内容比 canvas 矮 -> 不可滚动、滚动条隐藏
+        item = canvas.create_rectangle(0, 0, 100, 20, outline="")
+        self.app.update_idletasks()
+        self.assertFalse(self.app._canvas_can_scroll(canvas))
+        self.app._sync_scrollbar(canvas)
+        self.app.update_idletasks()
+        self.assertEqual(scrollbar.winfo_manager(), "", "内容放得下时滚动条不该参与布局")
+
+        # 内容远超 canvas 高度 -> 可滚动、滚动条显示
+        canvas.coords(item, 0, 0, 100, 100000)
+        self.app.update_idletasks()
+        self.assertTrue(self.app._canvas_can_scroll(canvas))
+        self.app._sync_scrollbar(canvas)
+        self.app.update_idletasks()
+        self.assertEqual(scrollbar.winfo_manager(), "pack", "内容放不下时滚动条应当显示")
+
+        del self.app._scrollbars[str(canvas)]
+        holder.destroy()
+
+    # 放得下时滚轮不该被吃掉：否则用户会以为"滚了没反应"就是卡住了。
+    # 返回 None = 不接管（交回 Tk），返回 "break" = 已处理。
+    def test_wheel_released_when_nothing_to_scroll(self):
+        import tkinter as tk
+        holder = tk.Frame(self.app)
+        holder.place(x=0, y=0, width=400, height=200)
+        canvas = tk.Canvas(holder, height=200)
+        rows = ui.ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=rows, anchor="nw")
+        canvas.pack(fill="both", expand=True)
+        inside = ui.ttk.Label(rows, text="short")
+        inside.pack()
+        self.app.update_idletasks()
+        self.app._scroll_canvases[str(rows)] = canvas
+        self.app._bind_wheel(canvas, rows)
+        self.app.update_idletasks()
+
+        # 内容只有一行，放得下
+        self.assertGreater(canvas.winfo_height(), 50,
+                           "canvas 未获得有效高度，测试前提不成立")
+        self.assertFalse(self.app._canvas_can_scroll(canvas))
+
+        calls = []
+        original = canvas.yview_scroll
+        canvas.yview_scroll = lambda *args: calls.append(args)
+        try:
+            self.app.tk.call("event", "generate", str(inside), "<MouseWheel>", "-delta", -120)
+            self.app.update_idletasks()
+        finally:
+            canvas.yview_scroll = original
+        self.assertEqual(calls, [], "内容放得下时不该再滚动外层")
+
+        del self.app._scroll_canvases[str(rows)]
+        holder.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
