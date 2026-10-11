@@ -146,6 +146,106 @@ def save_config(path, cfg):
         if temporary.exists():temporary.unlink()
 
 
+def enable_windows_dpi_awareness() -> None:
+    """声明本进程为 DPI 感知，避免窗口被 Windows 当位图拉伸而发虚。
+
+    **不做会怎样**：``python.exe`` 与 PyInstaller 生成的 exe 都没有 DPI 感知声明，
+    Windows 于是按 96 DPI 渲染整个窗口、再放大到实际显示器缩放比例。在 150% 缩放的
+    2560x1600 屏上，Tk 看到的屏幕是 1707x1067（虚拟坐标）、11pt 文字的行高只有 20px，
+    随后被整体拉伸 1.5 倍 —— 结果是整窗发虚，而且硬编码的 1100x820 只相当于
+    733x547 逻辑像素，窗口显得又小又糊。
+
+    声明之后：Tk 拿到真实坐标（2560x1600）、文字按真实 DPI 绘制（11pt 行高 30px），
+    清晰度与物理尺寸都正确。相应地，窗口几何必须改用逻辑像素（见 ``_scaled_geometry``）。
+
+    **必须在 import tkinter / 创建 Tk 根窗口之前调用**：Tk 初始化时会读取当前进程的
+    DPI 感知状态并据此算出 ``tk scaling``，之后再改就晚了。
+    `pbb/gui.py`（冻结入口）与 `main.py`（源码入口）都在导入 GUI 之前调它。
+
+    调用顺序是实测出来的：``SetProcessDPIAware``（user32，始终可用）与
+    ``SetProcessDpiAwareness(2)``（shcore）在本机都能生效；而
+    ``SetProcessDpiAwarenessContext(-4)`` 会静默失败（屏宽仍为 1707 虚拟坐标），
+    所以不把它当首选。DLL 加载时机也会影响结果，因此让 user32 那条先跑。
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 2 = PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        pass
+
+
+# 量 DPI 需要一个已存在的 Tk 解释器（winfo_fpixels 是 interpreter 上的命令）。
+# 这里复用一个隐藏的根窗口，避免为了量一次 DPI 而多起 Tk 实例。
+_DPI_PROBE_ROOT = None
+
+
+def _dpi_probe_root():
+    """返回用于查询 DPI / 屏幕尺寸的隐藏 Tk 根窗口（按需创建并复用）。"""
+    global _DPI_PROBE_ROOT
+    if _DPI_PROBE_ROOT is None:
+        _DPI_PROBE_ROOT = tk.Tk()
+        _DPI_PROBE_ROOT.withdraw()
+    return _DPI_PROBE_ROOT
+
+
+def windows_dpi_scale() -> float:
+    """返回系统 DPI 相对 96 的缩放系数（例如 150% → 1.5）。
+
+    问 Tk（``winfo_fpixels('1i')`` 是 Tk 眼中的每英寸像素数）：它已经反映了本进程的
+    DPI 感知状态与所在显示器。查询失败时兜底 1.0，让界面退化成旧行为而不是崩掉。
+    非 Windows 上这个值在多数平台同样正确，所以不做平台分支。
+    """
+    try:
+        pixels_per_inch = float(_dpi_probe_root().winfo_fpixels("1i"))
+        if pixels_per_inch > 0:
+            return pixels_per_inch / 96.0
+    except Exception:
+        pass
+    return 1.0
+
+
+def scaled_geometry(logical_width: int, logical_height: int,
+                    max_fraction: tuple[float, float] = (0.96, 0.92)) -> str:
+    """把逻辑像素尺寸换算成当前 DPI 下的物理像素 ``"WxH"``，并限制在屏幕内。
+
+    ``logical_width/height`` 按 96 DPI 的设计尺寸书写（例如 1100x820）；在 150% 缩放下
+    会得到 1650x1230。``max_fraction`` 是对屏幕宽/高的占用上限 —— 高分屏上物理像素会
+    成比例变大，超出屏幕就等于窗口开不出来，所以必须夹一下（高度留更多余量给标题栏
+    与任务栏）。
+    """
+    try:
+        root = _dpi_probe_root()
+        screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
+    except Exception:
+        screen_w, screen_h = 1920, 1080
+    scale = windows_dpi_scale()
+    width = min(int(round(logical_width * scale)), int(screen_w * max_fraction[0]))
+    height = min(int(round(logical_height * scale)), int(screen_h * max_fraction[1]))
+    return f"{max(width, 640)}x{max(height, 480)}"
+
+
+def _scaled_min_size(logical_width: int, logical_height: int) -> tuple[int, int]:
+    """把逻辑像素的最小尺寸换算成物理像素，供 ``minsize()`` 使用。
+
+    与 ``scaled_geometry`` 不同，这里不保证能塞进屏幕：最小尺寸是"用户手动拖拽的下限"，
+    把它夹到屏幕以内会让高分屏上的窗口能被拖到过小。只对高度留一点余量（标题栏 + 任务栏）。
+    """
+    try:
+        screen_h = _dpi_probe_root().winfo_screenheight()
+    except Exception:
+        screen_h = 1080
+    scale = windows_dpi_scale()
+    width = int(round(logical_width * scale))
+    height = min(int(round(logical_height * scale)), int(screen_h * 0.95))
+    return max(width, 480), max(height, 360)
+
+
 def load_ui_font():
     """把随包字体注册到本进程，供 Tk 使用「等距更纱黑体 SC」而不必系统安装。
 
@@ -247,8 +347,10 @@ class Monitor(tk.Tk):
             self._icon_image = tk.PhotoImage(file=ICON_PNG_FILE)
             self.iconphoto(True, self._icon_image)
         self.after_idle(lambda: apply_windows_window_icon(self))
-        self.geometry("1100x820")
-        self.minsize(880, 640)
+        # 尺寸按"96 DPI 下的逻辑像素"书写，由 scaled_geometry 换算到当前 DPI 的物理像素。
+        # 直接写死物理像素在 150% 缩放下会显得很小（1100 物理像素只相当于 733 逻辑像素）。
+        self.geometry(scaled_geometry(1100, 820))
+        self.minsize(*_scaled_min_size(880, 640))
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.proc: subprocess.Popen | None = None
         self.engine_bin: str | None = None
@@ -875,8 +977,8 @@ class Monitor(tk.Tk):
         if self._icon_image is not None:
             editor.iconphoto(True, self._icon_image)
         editor.after_idle(lambda: apply_windows_window_icon(editor))
-        editor.geometry("980x820")
-        editor.minsize(820, 660)
+        editor.geometry(scaled_geometry(980, 820))
+        editor.minsize(*_scaled_min_size(820, 660))
         editor.configure(bg=self.colors["bg"])
         editor.transient(self)
         editor.protocol("WM_DELETE_WINDOW", self._close_editor)

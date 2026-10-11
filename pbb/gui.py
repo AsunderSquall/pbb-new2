@@ -48,8 +48,12 @@ def main(argv=None) -> int:
             pass
 
     try:
-        from pbb.ui import Monitor, load_ui_font, configure_windows_identity
+        from pbb.ui import (Monitor, configure_windows_identity, enable_windows_dpi_awareness,
+                            load_ui_font)
 
+        # 顺序有讲究：DPI 感知必须早于任何 Tk 根窗口的创建（Monitor() 会建），
+        # 否则 Tk 已经按未感知的 96 DPI 算好渲染尺寸，之后改也来不及。
+        enable_windows_dpi_awareness()
         load_ui_font()
         configure_windows_identity()
         window = Monitor()
