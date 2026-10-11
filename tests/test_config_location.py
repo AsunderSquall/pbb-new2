@@ -127,5 +127,43 @@ class ConfigLocationTests(unittest.TestCase):
             with self.assertRaises(ValueError):ui.save_config(path,{'unsupported':None})
             self.assertEqual(path.read_text(),'old')
 
+    # 回归：配置校验失败时，编辑器必须"弹窗并留在原地"，不能把监控器进程干掉。
+    #
+    # 原来的 _die() 直接 sys.exit(1)，抛出的 SystemExit 继承自 BaseException，
+    # 而 _save_editor / _open_editor / _start / _choose_config 用的都是 except Exception，
+    # 于是异常一路逃到 Tk 回调之外、进程退出 —— 用户看到的就是"保存时闪退"，
+    # 既没有提示、也不知道哪里填错了。
+    # 现在 _die() 抛 ConfigError（继承 Exception），各调用处既能捕获也能显示原因。
+    def test_invalid_config_shows_error_instead_of_killing_process(self):
+        cfg = ui.load_config("config_football.yaml")
+        # min_cqd>0 但 score_list 里没有 cqd：门控会失效，属被明确拒绝的配置。
+        cfg["collection"]["min_cqd"] = 4000
+        cfg["collection"]["score_list"] = "qp,qd,cp,fp,wc,fs,pj"
+        cfg["enumeration"]["mode"] = 4           # 绕开一一对应配对提示
+        cfg["prefixes"] = [{"name": "A"}]
+        cfg["suffixes"] = [{"name": "X"}]
+
+        with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory:
+            target = Path(directory) / "out.toml"
+            variable = Mock()
+            variable.get.return_value = str(target)
+            owner = SimpleNamespace(
+                _editor_config=Mock(return_value=cfg), editor=None,
+                _confirm_affix_mismatch=Mock(return_value=True),
+                config_var=variable, _sync_config_controls=Mock(),
+                _close_editor=Mock(), _start=Mock(), editor_cfg=None)
+
+            # 这里不 mock _validate_config：走真实校验，任何异常一旦逃出 _save_editor
+            # 都会让测试直接报错（而不是被 except 静默吃掉），所以它同时守住两件事 ——
+            # 校验确实拒绝了这份配置，且拒绝的方式是"弹窗"而不是"退出进程"。
+            with patch.object(ui.messagebox, "showerror") as error:
+                ui.Monitor._save_editor(owner)
+
+            error.assert_called_once()
+            self.assertIn("无法保存配置", error.call_args[0][0])
+            self.assertIn("min_cqd", error.call_args[0][1])
+            self.assertFalse(target.exists(), "校验失败时不应写出配置文件")
+            owner._start.assert_not_called()
+
 
 if __name__=='__main__':unittest.main()

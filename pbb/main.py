@@ -366,9 +366,28 @@ def _print_results(results: list, output_xp: int):
             print(r["name"])
 
 
+class ConfigError(Exception):
+    """配置校验失败。
+
+    **为什么不用 SystemExit**：``_validate_config`` 同时被 CLI 和图形监控器调用。
+    早期实现里 ``_die()`` 直接 ``sys.exit(1)``（抛 ``SystemExit``），而 ``SystemExit``
+    继承自 ``BaseException``，图形界面各处的 ``except Exception`` 都拦不住它 ——
+    结果是「保存配置时校验不通过」会直接把监控器进程干掉（表现为闪退、无任何提示），
+    而不是弹一个错误框。
+
+    改成抛本异常（继承 ``Exception``）后：
+      - CLI 在 main() 的边界统一捕获并转成退出码 1，行为与以前一致；
+      - GUI 各处既有的 ``except Exception`` 自然能捕获并弹窗，信息也能完整显示。
+    """
+
+
 def _die(msg: str):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
+    """配置校验失败的统一出口：抛出 ``ConfigError``。
+
+    只抛不打印 —— 打印交给各自的边界处理（CLI 在 ``__main__`` 里打印一次并退出码 1；
+    图形界面由调用处的 ``except`` 弹窗展示），避免同一条信息被打印两遍。
+    """
+    raise ConfigError(msg)
 
 
 def _validate_config(cfg: dict):
@@ -814,4 +833,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # CLI 边界：把配置错误转成退出码 1（与旧的 sys.exit(1) 行为一致）。
+    # 这样模块内部只需要 raise，不必关心"谁在调用我"。
+    try:
+        main()
+    except ConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
