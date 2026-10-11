@@ -1,0 +1,66 @@
+# =============================================================================
+# PBB — attribute rules
+#
+# 目标：
+#   1. 所有文本文件在仓库里统一用 LF。这样 Windows 与 Linux 上检出的内容一致，
+#      diff 不会因为编辑器/系统差异产生整文件噪音。
+#   2. 二进制文件永不被当成文本处理（不 diff、不转换行尾）。
+#   3. 生成的压缩包与 PDF 不参与行尾归一化。
+#
+# 行尾策略说明：cmd.exe 能正确执行 LF 结尾的 .bat，因此这里对 .bat 也强制 LF，
+# 与其余文本保持一致。若以后确实需要 CRLF 的批处理，把 `*.bat` 一行改成
+# `*.bat text eol=crlf` 即可，但请同时把已有 .bat 文件转成 CRLF。
+# =============================================================================
+
+# --- 默认：自动识别文本/二进制 ------------------------------------------------
+* text=auto
+
+# --- 文本文件：一律 LF --------------------------------------------------------
+*.py   text eol=lf diff=python
+*.pyi  text eol=lf diff=python
+*.hpp  text eol=lf
+*.hh   text eol=lf
+*.h    text eol=lf
+*.cpp  text eol=lf
+*.cc   text eol=lf
+*.cxx  text eol=lf
+*.c    text eol=lf
+*.md   text eol=lf
+*.spec text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.toml text eol=lf
+*.def  text eol=lf
+*.txt  text eol=lf
+*.ini  text eol=lf
+*.cfg  text eol=lf
+*.sh   text eol=lf
+*.bat  text eol=lf
+*.cmd  text eol=lf
+
+# --- 二进制：不 diff、不做行尾转换 --------------------------------------------
+# 编译产物（build/）已被 .gitignore 排除，但发布输入与随包字体仍需显式标为二进制。
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary
+*.ico  binary
+*.png  binary
+*.gif  binary
+*.jpg  binary
+*.jpeg binary
+*.pdf  binary
+*.exe  binary
+*.dll  binary
+*.pyd  binary
+*.so   binary
+*.dylib binary
+*.a    binary
+*.lib  binary
+*.o    binary
+*.obj  binary
+*.zip  binary
+*.7z   binary
+*.tar  binary
+*.gz   binary
