@@ -199,4 +199,4 @@ python ui.py
 
 ## 特别鸣谢
 
-特别鸣谢：powerless、曙光、shenjack、区猴猴区、超导体元素对本项目的贡献。也感谢每一个参与测试的玩家。最后感谢 deepseek 和 openai 的模型。
+特别鸣谢：powerless、曙光、shenjack、区猴猴区、超导体元素、Shabby_fish 对本项目的贡献。也感谢每一个参与测试的玩家。最后感谢 deepseek 和 openai 的模型。
