@@ -224,6 +224,80 @@ class AffixEditorTests(unittest.TestCase):
         cfg = app._editor_config()
         self.assertNotIn("qd", cfg["collection"]["score_list"].split(","))
 
+    # 结果文件的三模式：模式决定写入 "+"/"-"，自定义才写文件名。
+    # 背景：output.result_file 里 "+"=随机名、"-"=时间戳（见 main._resolve_result_file），
+    # 以前是一个裸输入框，用户填 "-" 会被引擎当成字面文件名，在 out/ 下写出名为 "-" 的文件。
+    def test_result_file_mode_maps_to_sign_or_custom_name(self):
+        app = self.app
+        mode = app.editor_vars["output.result_file.mode"]
+        name = app.editor_vars["output.result_file.name"]
+
+        mode.set("随机名")
+        self.assertEqual(app._editor_config()["output"]["result_file"], "+")
+
+        mode.set("时间戳")
+        self.assertEqual(app._editor_config()["output"]["result_file"], "-")
+
+        mode.set("自定义")
+        name.set("my_result.txt")
+        self.assertEqual(app._editor_config()["output"]["result_file"], "my_result.txt")
+
+    # 自定义模式留空时必须退回时间戳：否则会写出空文件名，
+        # 引擎拼出 "out/" 的目录路径而打不开结果文件（直接报错退出）。
+    def test_empty_custom_name_falls_back_to_timestamp(self):
+        app = self.app
+        app.editor_vars["output.result_file.mode"].set("自定义")
+        app.editor_vars["output.result_file.name"].set("   ")
+        self.assertEqual(app._editor_config()["output"]["result_file"], "-")
+
+    # 三个可滚动区域（前缀/后缀/排行榜）里的子控件都必须绑上滚轮。
+    # 原来只绑了 canvas 自身，鼠标停在里面的标签/输入框上就完全滚不动 ——
+    # 表现为"只能拖滚动条"。
+    def test_scroll_areas_bind_wheel_on_child_widgets(self):
+        app = self.app
+        # 前后缀区：加几行再检查
+        for _ in range(5):
+            app._add_prefix_row("P")
+        for _ in range(5):
+            app._add_suffix_row("S")
+        app.update_idletasks()
+
+        def descendants(widget):
+            out, stack = [], [widget]
+            while stack:
+                current = stack.pop()
+                out.append(current)
+                stack.extend(current.winfo_children())
+            return out
+
+        for label, canvas, container in (
+            ("前缀区", app._canvas_of(app.prefix_rows_frame), app.prefix_rows_frame),
+            ("后缀区", app._canvas_of(app.suffix_rows_frame), app.suffix_rows_frame),
+        ):
+            self.assertIsNotNone(canvas, f"{label} 未登记 canvas")
+            unbound = [w for w in descendants(container) if not w.bind("<MouseWheel>")]
+            self.assertEqual(unbound, [], f"{label} 有未绑定滚轮的控件: {unbound[:3]}")
+
+    # 幂等性：重复绑定同一个控件会让一次滚轮滚动多倍距离，必须只绑一次。
+    def test_repeated_binding_is_idempotent(self):
+        app = self.app
+        app._add_prefix_row("P")
+        app.update_idletasks()
+        canvas = app._canvas_of(app.prefix_rows_frame)
+        container = app.prefix_rows_frame
+        app._bind_wheel(canvas, container)
+        first = container.winfo_children()[0]
+        before = first.bind("<MouseWheel>")
+        app._bind_wheel(canvas, container)
+        self.assertEqual(first.bind("<MouseWheel>"), before)
+
+    # 像素换算：Frame 的 width / Label 的 wraplength 都是物理像素，
+    # 这类尺寸必须经 pixels() 换算，否则高 DPI 下会被挤扁（侧栏 390 只相当于 260 逻辑像素）。
+    def test_pixels_scales_with_dpi(self):
+        scale = ui.windows_dpi_scale()
+        self.assertEqual(ui.pixels(390), round(390 * scale))
+        self.assertGreaterEqual(ui.pixels(1), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

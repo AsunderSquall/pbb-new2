@@ -21,7 +21,8 @@ class RowDragTests(unittest.TestCase):
     # 防的是导入配置后界面还显示旧评分族，用户以为在跑新配置。
     def test_import_updates_idle_score_panels(self):
         owner = SimpleNamespace(
-            running=False, threads_var=Mock(), range_var=Mock(), result_var=Mock(),
+            running=False, threads_var=Mock(), range_var=Mock(),
+            _apply_result_file_setting=Mock(),
             families=["qp"], boards={}, expanded_families={"qp", "fp"},
             _cfg_value=Monitor._cfg_value, _families_from_task=Monitor._families_from_task,
             _render_score_boxes=Mock(), _refresh_boards=Mock(),

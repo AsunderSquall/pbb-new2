@@ -28,7 +28,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import build_settings, engine as engine_runner, paths
 from ._build import _compile_engine, _binary_is_current, ensure_core
-from .main import _build_task_config, _validate_config
+from .main import _build_task_config, _resolve_result_file, _validate_config
 
 
 # 数据根：开发仓库里是仓库根，PyInstaller 冻结后是 _internal/。
@@ -53,7 +53,11 @@ ENUMERATION_MODES = {
 }
 SCORE_MODES = {"全部评分后判断": "all", "任一达标即停止后续评分": "any"}
 COLLECT_MODES = {"不收集特殊号": 0, "收集预设阈值特殊号": 1, "收集自定义阈值特殊号": 2}
-OUTPUT_SCORE_MODES = {"仅输出姓名": 0, "输出姓名和评分": 1}
+OUTPUT_SCORE_MODES = {"仅输出名字": 0, "输出名字和评分": 1}
+# 结果文件名模式 (对应 output.result_file 的三种写法, 见 main._resolve_result_file):
+#   "+" = 随机名 (result_<8位hex>.txt), "-" = 时间戳 (result_<YYYYMMDD_HHMMSS>.txt),
+#   其他 = 自定义文件名。两个符号是跨语言契约 (CLI 的 -o 也用同一套), 不要改含义。
+RESULT_FILE_MODES = {"随机名": "+", "时间戳": "-", "自定义": ""}
 CHARSET_TYPES = {
     1: {
         "数字": 1,
@@ -246,6 +250,20 @@ def _scaled_min_size(logical_width: int, logical_height: int) -> tuple[int, int]
     return max(width, 480), max(height, 360)
 
 
+def pixels(logical: int) -> int:
+    """把「96 DPI 下的逻辑像素」换算成当前 DPI 的物理像素，用于 Tk 的像素类参数。
+
+    **为什么需要**：Tk 里 ``width=`` / ``height=`` 在不同控件上单位不同 ——
+    Entry/Label/Text 等按**字符数**计（与 DPI 无关，不需要换算），
+    而 Frame 的 ``width``、Label 的 ``wraplength``、Canvas 的 ``height`` 按**像素**计。
+    这类像素参数如果写死，在 150% 缩放下就会偏小（例如侧栏 390 只相当于 260 逻辑像素），
+    表现为布局被挤扁、文字换行位置莫名其妙。
+
+    因此：控件尺寸写逻辑像素时一律经本函数换算，不要直接写物理像素。
+    """
+    return max(1, int(round(logical * windows_dpi_scale())))
+
+
 def load_ui_font():
     """把随包字体注册到本进程，供 Tk 使用「等距更纱黑体 SC」而不必系统安装。
 
@@ -360,6 +378,11 @@ class Monitor(tk.Tk):
         self.dark_mode = False
         self.colors = {"bg": "#f7f7f7", "panel": "#ffffff", "field": "#ffffff", "text": "#171717", "accent": "#171717"}
         self._theme_checkbuttons: list[tk.Checkbutton] = []
+        # 滚轮绑定去重表: canvas id -> 已绑定的控件 id 集合（见 _bind_wheel 的幂等说明）
+        self._wheel_bound: dict[str, set[str]] = {}
+        # 行容器 -> 承载它的 canvas（见 _canvas_of）
+        self._scroll_canvases: dict[str, tk.Canvas] = {}
+        self._editor_canvases: list[tk.Canvas] = []
         self.families: list[str] = list(FAMILIES)
         self.boards: dict[str, list[tuple[int, str]]] = {}
         self.score_views: dict[str, tk.Widget] = {}
@@ -377,8 +400,10 @@ class Monitor(tk.Tk):
         self.runtime_thread_limit = 0
         self.runtime_active_threads = 0
         self.range_var = tk.StringVar(value="-1")
-        stamp = datetime.now().strftime("ui_%Y%m%d_%H%M%S.txt")
-        self.result_var = tk.StringVar(value=stamp)
+        # 结果文件：模式（随机名/时间戳/自定义）+ 自定义名。
+        # 用两个变量而不是一个裸输入框，避免用户直接填 "+"/"-" 时被当成字面文件名。
+        self.result_mode_var = tk.StringVar(value="时间戳")
+        self.result_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="准备就绪")
         self.editor: tk.Toplevel | None = None
         self.editor_cfg: dict | None = None
@@ -398,7 +423,9 @@ class Monitor(tk.Tk):
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
-        sidebar = ttk.Frame(body, width=390)
+        # 侧栏宽度按逻辑像素给出后再换算：Frame 的 width 是物理像素，写死会在高 DPI 下发窄
+        # （150% 下 390 只相当于 260 逻辑像素，多出来的宽度全被右栏吃掉）。
+        sidebar = ttk.Frame(body, width=pixels(390))
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
         right = ttk.Frame(body, padding=(14, 12, 18, 12))
@@ -446,7 +473,7 @@ class Monitor(tk.Tk):
         ttk.Label(controls, text="结束范围").grid(row=6, column=0, sticky="w", pady=(10, 2))
         ttk.Entry(controls, textvariable=self.range_var).grid(row=7, column=0, columnspan=2, sticky="ew")
         ttk.Label(controls, text="结果文件").grid(row=8, column=0, sticky="w", pady=(10, 2))
-        ttk.Entry(controls, textvariable=self.result_var).grid(row=9, column=0, columnspan=2, sticky="ew")
+        self._build_main_result_file(controls)
         launch_options = ttk.Frame(controls)
         launch_options.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.resume_checkbutton = self._checkbutton(launch_options, "Resume 续测", self.resume_var)
@@ -460,14 +487,24 @@ class Monitor(tk.Tk):
         ttk.Button(controls, text="编辑配置", command=self._open_editor).grid(row=12, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         controls.columnconfigure(0, weight=1)
 
+        # 提示文字：wraplength 是像素，写死会带来两个问题 ——
+        #   1. 高 DPI 下过窄，文字比可用宽度更早断行；
+        #   2. 窗口拉宽后仍按旧宽度断行，右边留一大片空白。
+        # 改用"跟随父容器宽度"的绑定（见 _wrap_label）。
+        #
+        # 同时**不再在正文里写 '\n' 硬换行**：硬换行会让断行点固定在句子中间，
+        # 与容器实际宽度无关，看起来就是"换行位置莫名其妙"。现在交给 wraplength
+        # 按容器宽度自然断行。
         ttk.Label(
             right, text="重要启动选项：Resume 续测 / Rebuild 引擎", style="LaunchNotice.TLabel",
         ).pack(anchor="w", pady=(0, 4))
-        ttk.Label(
-            right, text="接着上次进度测号请勾选 Resume。\n推荐暂停测号后运行外层 tune_full.bat（推荐 20 分钟），自动选择本机优化。\n测试完成后仍须勾选 Rebuild 引擎重建一次；重建前实际引擎尚未应用测试选择。",
-            style="LaunchNotice.TLabel",
-            wraplength=540,
-        ).pack(anchor="w", pady=(0, 12))
+        self._wrap_label(ttk.Label(
+            right,
+            text=("接着上次进度测号请勾选 Resume。推荐暂停测号后运行外层 tune_full.bat"
+                  "（推荐 20 分钟），自动选择本机优化。测试完成后仍须勾选 Rebuild 引擎"
+                  "重建一次；重建前实际引擎尚未应用测试选择。"),
+            style="LaunchNotice.TLabel", justify="left",
+        )).pack(anchor="w", fill="x", pady=(0, 12))
         score_header = ttk.Frame(right)
         score_header.pack(fill="x", pady=(0, 6))
         ttk.Label(score_header, text="评分排行榜", font=(UI_FONT, 14, "bold")).pack(side="left")
@@ -484,6 +521,8 @@ class Monitor(tk.Tk):
         self.score_window = self.score_canvas.create_window((0, 0), window=self.score_area, anchor="nw")
         self.score_area.bind("<Configure>", self._sync_score_scroll)
         self.score_canvas.bind("<Configure>", self._resize_score_area)
+        # 排行榜也要支持滚轮。原来这里没有任何滚轮绑定，只能拖滚动条。
+        self._bind_wheel(self.score_canvas, self.score_area)
         self._render_score_boxes(self.families)
 
         footer = ttk.Frame(sidebar, padding=(22, 8))
@@ -537,12 +576,59 @@ class Monitor(tk.Tk):
             if isinstance(view, tk.Text):
                 view.configure(bg=colors["field"], fg=colors["text"], font=(UI_FONT, 11))
 
+    def _build_main_result_file(self, controls):
+        """主窗口「结果文件」行：模式下拉框 + （仅自定义时可见的）文件名输入框。
+
+        与编辑器输出页共用同一套语义（见 RESULT_FILE_MODES 与 main._resolve_result_file）。
+        初始为「时间戳」，与历史行为一致（以前默认填 ui_<时间戳>.txt）。
+        """
+        holder = ttk.Frame(controls)
+        holder.grid(row=9, column=0, columnspan=2, sticky="ew")
+        holder.columnconfigure(0, weight=1)
+        holder.columnconfigure(1, weight=1)
+
+        self.result_mode_box = ttk.Combobox(
+            holder, textvariable=self.result_mode_var, values=tuple(RESULT_FILE_MODES),
+            state="readonly", width=8)
+        self.result_mode_box.grid(row=0, column=0, sticky="ew")
+        self.result_name_entry = ttk.Entry(holder, textvariable=self.result_var)
+        self.result_name_entry.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        def sync_mode(*_args):
+            """只有「自定义」显示输入框；其余模式隐藏（不覆盖 result_var，
+            因为 _launch 会按模式决定实际取值，而 _resolve_result_file 以 "-" 为时间戳）。"""
+            if self.result_mode_var.get() == "自定义":
+                self.result_name_entry.grid()
+            else:
+                self.result_name_entry.grid_remove()
+        self.result_mode_var.trace_add("write", sync_mode)
+        sync_mode()
+
+    def _apply_result_file_setting(self, value):
+        """把配置里的 output.result_file 反映到主窗口的模式下拉框（导入配置时调用）。"""
+        raw = str(value or "").strip()
+        if raw == "+":
+            self.result_mode_var.set("随机名")
+        elif raw in ("-", ""):
+            self.result_mode_var.set("时间戳")
+        else:
+            self.result_mode_var.set("自定义")
+            self.result_var.set(raw)
+
+    def _selected_result_file(self) -> str:
+        """按当前模式给出交给 _resolve_result_file 的取值（"+"/"-"/自定义名）。"""
+        mode = self.result_mode_var.get()
+        if mode == "自定义":
+            return self.result_var.get().strip()
+        return RESULT_FILE_MODES.get(mode, "-")
+
     def _render_score_boxes(self, families: list[str]):
         for child in self.score_area.winfo_children():
             child.destroy()
         self.score_views.clear()
         if not families:
             ttk.Label(self.score_area, text="选择配置后点击“开始”，这里会显示各评分族的第一名。", font=(UI_FONT, 12)).pack(anchor="center", pady=80)
+            self._bind_wheel(self.score_canvas, self.score_area)
             return
         for index, family in enumerate(families):
             panel = ttk.Frame(self.score_area, padding=8)
@@ -566,6 +652,9 @@ class Monitor(tk.Tk):
                 view.pack(side="left", padx=(18, 0))
             self.score_views[family] = view
         self.score_area.columnconfigure(0, weight=1)
+        # 面板建完之后才绑滚轮：_bind_wheel 只遍历"当前已存在"的控件，
+        # 放在建面板之前会漏掉全部面板（只剩 score_area 自己绑上）。
+        self._bind_wheel(self.score_canvas, self.score_area)
 
     def _expand_top5(self):
         self.expanded_families = set(self.families)
@@ -627,7 +716,7 @@ class Monitor(tk.Tk):
                 self._refresh_boards()
         ranges = cfg.get("enumeration", {}).get("ranges", [])
         self.range_var.set(str(ranges[0].get("end", -1) if ranges else -1))
-        self.result_var.set(str(cfg.get("output", {}).get("result_file", "result.txt")))
+        self._apply_result_file_setting(cfg.get("output", {}).get("result_file", "-"))
 
     @staticmethod
     def _cfg_value(cfg: dict, path: str, default=""):
@@ -676,9 +765,104 @@ class Monitor(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         rows.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
-        canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-int(event.delta / 120), "units"))
         self._editor_canvases.append(canvas)
+        # 登记 rows→canvas 映射，供新增行后重绑滚轮（_canvas_of）
+        self._scroll_canvases[str(rows)] = canvas
+        # 滚轮绑定交给 _bind_wheel（它会覆盖整个子树，且新建行后需再次调用）。
+        # 这里先绑一次，覆盖"打开编辑器时还没有任何行"的情况。
+        self._bind_wheel(canvas, rows)
         return section, rows, viewport
+
+    def _wrap_label(self, label, margin: int = 8):
+        """让一个多行 Label 的换行宽度跟随父容器实际宽度（而不是写死 wraplength）。
+
+        **为什么需要**：Tk 的 ``wraplength`` 单位是像素，写死会带来两个问题 ——
+          1. 高 DPI 下偏窄，文字比可用宽度更早断行，出现莫名其妙的换行位置；
+          2. 窗口拉宽后文字仍按旧宽度断行，右边留一大片空白。
+        改为在父容器 ``<Configure>`` 时把 ``wraplength`` 设为「父容器宽度 - margin」，
+        文字就能始终铺满可用宽度，且随窗口缩放自适应。
+
+        ``margin`` 用来给父容器的内边距留出余量，避免贴边。
+
+        注意：调用方需要让该 Label ``fill="x"``，否则 Label 自身宽度不会随之增长。
+        """
+        parent = label.master
+
+        def resize(event=None):
+            try:
+                width = (event.width if event is not None else parent.winfo_width())
+            except Exception:
+                return
+            if width > 1:
+                label.configure(wraplength=max(width - margin, 80))
+
+        parent.bind("<Configure>", resize, add="+")
+        # 父容器尺寸确定前先给一个初始值，避免首帧出现超长单行
+        resize()
+        return label
+
+    def _canvas_of(self, container):
+        """找出承载 ``container`` 的那个可滚动 canvas（没有则返回 None）。
+
+        编辑器里的行容器（prefix_rows_frame 等）是 canvas.create_window 放进 canvas 的，
+        两者之间没有父子关系（Tk 里 window item 不在 canvas 的控件树中），所以没法直接
+        取到。这里按 create_window 登记的映射查，供"新增行后重绑滚轮"使用。
+        """
+        return self._scroll_canvases.get(str(container))
+
+    def _bind_wheel(self, canvas, container):
+        """让鼠标滚轮在整个可滚动区域内生效（含所有子控件，且适配动态新增的行）。
+
+        **为什么不能只绑 canvas**：Tk 的鼠标事件只发给**光标下的那个控件**，不会冒泡到
+        父级。原来只写了 ``canvas.bind("<MouseWheel>", ...)``，于是只有把鼠标精确移到
+        canvas 自身的空白处才能滚，移到里面的标签/输入框上就完全没反应 —— 表现为
+        "滚轮失效，只能拖滚动条"。
+
+        做法：遍历 ``container`` 的整棵控件树，逐个绑定滚轮，统一驱动该 canvas 的
+        yview_scroll。新建行之后需要再调用一次（见 _add_prefix_row 等）。
+
+        幂等：同一个控件只绑一次（用 ``_wheel_bound`` 记录），避免重复调用把回调叠加
+        多次 —— 那会让一次滚轮滚动多倍距离。
+
+        两处不接管滚轮：
+          - ``tk.Text`` 自己有滚动余量时优先滚它自己（编辑器里有多行文本框），
+            滚到头才交回外层 canvas，避免"内外一起滚"；
+          - ``ttk.Combobox`` 的滚轮用于切换选项，交给它自己。
+        """
+        def scroll_units(event):
+            """把 Windows 的 wheel delta 换算成滚动行数（delta=120 即一行）。"""
+            steps = int(event.delta / 120)
+            return -steps if steps else (-1 if event.delta < 0 else 1)
+
+        def on_wheel(event):
+            canvas.yview_scroll(scroll_units(event), "units")
+            return "break"
+
+        def on_text_wheel(event, text):
+            first, last = text.yview()
+            if (event.delta < 0 and last < 1.0) or (event.delta > 0 and first > 0.0):
+                text.yview_scroll(scroll_units(event), "units")
+                return "break"
+            return None      # 文本已滚到底/顶，放行给外层 canvas
+
+        bound = self._wheel_bound.setdefault(str(canvas), set())
+
+        def walk(widget):
+            key = str(widget)
+            if key not in bound:
+                bound.add(key)
+                if isinstance(widget, ttk.Combobox):
+                    pass
+                elif isinstance(widget, tk.Text):
+                    widget.bind("<MouseWheel>", lambda event, text=widget: on_text_wheel(event, text), add="+")
+                else:
+                    widget.bind("<MouseWheel>", on_wheel, add="+")
+            for child in widget.winfo_children():
+                walk(child)
+
+        walk(container)
+        # 区域本身也要能滚（鼠标停在 padding 空白上时）
+        canvas.bind("<MouseWheel>", on_wheel, add="+")
 
     def _checkbutton(self, parent, text: str, variable):
         """Use the native check indicator; clam renders a selected state as a cross."""
@@ -795,6 +979,8 @@ class Monitor(tk.Tk):
         self.prefix_rows.append(row)
         self._reindex_prefix_rows()
         self._refresh_prefix_range_state()
+        # 新行也要能滚（_bind_wheel 幂等，只绑新控件）
+        self._bind_wheel(self._canvas_of(self.prefix_rows_frame), self.prefix_rows_frame)
 
     def _remove_prefix_row(self, row):
         self.prefix_rows.remove(row)
@@ -816,6 +1002,8 @@ class Monitor(tk.Tk):
         row_frame.columnconfigure(2, weight=1)
         self.suffix_rows.append(row)
         self._reindex_suffix_rows()
+        # 新行也要能滚（_bind_wheel 幂等，只绑新控件）
+        self._bind_wheel(self._canvas_of(self.suffix_rows_frame), self.suffix_rows_frame)
 
     def _remove_suffix_row(self, row):
         self.suffix_rows.remove(row)
@@ -878,6 +1066,11 @@ class Monitor(tk.Tk):
             self.separate_affix_sections.pack(fill="both", expand=True)
         self.affix_view = selected
         self._refresh_prefix_range_state()
+        # 切换视图会重建全部行，新控件需要补绑滚轮（_bind_wheel 幂等）
+        for rows_frame in (self.prefix_rows_frame, self.suffix_rows_frame, self.pair_rows_frame):
+            canvas = self._canvas_of(rows_frame)
+            if canvas is not None:
+                self._bind_wheel(canvas, rows_frame)
 
     def _add_pair_row(self, prefix=("+", "0", "-1"), suffix="+"):
         """在一一对应视图里加一行「前缀 + 区间 + 后缀」组合。
@@ -922,6 +1115,8 @@ class Monitor(tk.Tk):
         self.pair_rows.append(row)
         self._reindex_pair_rows()
         self._refresh_prefix_range_state()
+        # 新行也要能滚（_bind_wheel 幂等，只绑新控件）
+        self._bind_wheel(self._canvas_of(self.pair_rows_frame), self.pair_rows_frame)
 
     def _reindex_pair_rows(self):
         for index, row in enumerate(self.pair_rows, start=1):
@@ -1000,8 +1195,9 @@ class Monitor(tk.Tk):
         )
         recommendation = ttk.Frame(editor, padding=(22, 0, 22, 10))
         recommendation.pack(fill="x")
-        ttk.Label(recommendation, text="推荐运行外层 tune_full.bat 自动优化（推荐 20 分钟）。测试后必须再 Rebuild 一遍，才能应用测试选择。",
-                  style="LaunchNotice.TLabel", wraplength=700).pack(anchor="w")
+        self._wrap_label(ttk.Label(
+            recommendation, text="推荐运行外层 tune_full.bat 自动优化（推荐 20 分钟）。测试后必须再 Rebuild 一遍，才能应用测试选择。",
+            style="LaunchNotice.TLabel", justify="left")).pack(anchor="w", fill="x")
         notebook = ttk.Notebook(editor)
         notebook.pack(fill="both", expand=True, padx=22, pady=(0, 12))
         basic = ttk.Frame(notebook, padding=18)
@@ -1015,6 +1211,10 @@ class Monitor(tk.Tk):
         self.editor_vars = {}
         self.editor_choice_maps = {}
         self._editor_canvases = []
+        # 上一次编辑器窗口的 canvas/控件已随窗口销毁，映射必须一起清空，
+        # 否则会持有失效控件引用。
+        self._scroll_canvases = {}
+        self._wheel_bound = {}
         self.prefix_rows = []
         self.suffix_rows = []
         self.pair_rows = []
@@ -1186,13 +1386,65 @@ class Monitor(tk.Tk):
         scores.columnconfigure(3, weight=1)
 
         out = cfg.get("output", {})
-        field(output, 0, "结果文件", "output.result_file", out.get("result_file", "result.txt"), width=45)
+        self._build_result_file_row(output, str(out.get("result_file", "+")))
         choice(output, 1, "输出模式", "output.output_xp", out.get("output_xp", 0), OUTPUT_SCORE_MODES)
         for row, (label, key, default) in enumerate((("记录日志", "output.log_output", 1), ("记录速度", "output.speed_output", 1)), start=2):
             var = tk.BooleanVar(value=bool(out.get(key.split(".")[-1], default)))
             self.editor_vars[key] = var
             self._checkbutton(output, label, var).grid(row=row, column=0, sticky="w", pady=8)
 
+
+    def _build_result_file_row(self, parent, value: str):
+        """在「输出」页建一行「结果文件」选择器：随机名 / 时间戳 / 自定义。
+
+        背景：``output.result_file`` 支持三种写法（见 main._resolve_result_file）——
+        ``+`` 随机名、``-`` 时间戳、其他为自定义文件名。以前界面上是一个裸输入框，
+        用户看不出 ``+``/``-`` 有特殊含义；更糟的是写成 ``-`` 时**字面量**会被当成文件名，
+        结果在 out/ 下产生一个名为 ``-`` 的文件（引擎只认字面量，解析发生在 Python 侧）。
+
+        这里把三种模式做成下拉框，选「自定义」时才显示输入框，避免用户误填符号。
+        """
+        ttk.Label(parent, text="结果文件").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=6)
+        holder = ttk.Frame(parent)
+        holder.grid(row=0, column=1, sticky="ew", pady=6)
+        holder.columnconfigure(0, weight=1)
+        holder.columnconfigure(1, weight=1)
+
+        # 已有取值 -> 模式：+ 随机、- 或空 时间戳、其他 自定义（沿用其自定义名）
+        raw = (value or "").strip()
+        if raw == "+":
+            initial = "随机名"
+        elif raw in ("-", ""):
+            initial = "时间戳"
+        else:
+            initial = "自定义"
+
+        mode_var = tk.StringVar(value=initial)
+        self.editor_vars["output.result_file.mode"] = mode_var
+        self.editor_choice_maps["output.result_file.mode"] = RESULT_FILE_MODES
+        box = ttk.Combobox(holder, textvariable=mode_var, values=tuple(RESULT_FILE_MODES),
+                           state="readonly", width=12)
+        box.grid(row=0, column=0, sticky="ew")
+
+        name_var = tk.StringVar(value="" if raw in ("+", "-") else raw)
+        self.editor_vars["output.result_file.name"] = name_var
+        entry = ttk.Entry(holder, textvariable=name_var, width=30)
+        entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        def sync_mode(*_args):
+            """只有「自定义」才显示文件名输入框；其余模式隐藏并清空该框。
+
+            清空是为了让保存逻辑只依赖模式（见 _editor_config）：避免用户先填了名字、
+            又切回随机名之后，那个残留名字被误当作生效值。
+            """
+            if mode_var.get() == "自定义":
+                entry.grid()
+            else:
+                entry.grid_remove()
+                name_var.set("")
+        mode_var.trace_add("write", sync_mode)
+        sync_mode()
+        return box
 
     def _selected_charset_types(self):
         selected={code for code,var in self.charset_type_vars.items() if var.get()}
@@ -1290,7 +1542,16 @@ class Monitor(tk.Tk):
         self.editor_vars["collection.score_list"].set(cfg["collection"]["score_list"])
         cfg["collection"]["score_mode"] = self.editor_choice_maps["collection.score_mode"][self.editor_vars["collection.score_mode"].get()]
         cfg["collection"]["collect_mode"] = self.editor_choice_maps["collection.collect_mode"][self.editor_vars["collection.collect_mode"].get()]
-        cfg["output"]["result_file"] = self.editor_vars["output.result_file"].get().strip()
+        # 结果文件：模式决定写 "+"/"-"，自定义模式写用户填的文件名。
+        # 注意这里**不做** _resolve_result_file 展开 —— 展开发生在运行/保存时，
+        # 这样配置文件里保留的是"+"/"-"这种意图，而不是某一次随机出来的具体文件名
+        # （否则每次保存都会把配置改写成新的时间戳，且 resume 会找不到上次的文件）。
+        result_mode = self.editor_vars["output.result_file.mode"].get()
+        if result_mode == "自定义":
+            custom = self.editor_vars["output.result_file.name"].get().strip()
+            cfg["output"]["result_file"] = custom or "-"   # 没填就退回时间戳，避免产生空文件名
+        else:
+            cfg["output"]["result_file"] = self.editor_choice_maps["output.result_file.mode"][result_mode]
         cfg["output"]["output_xp"] = self.editor_choice_maps["output.output_xp"][self.editor_vars["output.output_xp"].get()]
         cfg["output"]["log_output"] = int(self.editor_vars["output.log_output"].get())
         cfg["output"]["speed_output"] = int(self.editor_vars["output.speed_output"].get())
@@ -1463,7 +1724,11 @@ class Monitor(tk.Tk):
             engine_runner._pbb_core()
             self.pbb_core_initialized = True
             charset_hex = engine_runner._build_charset(task["character_set"])
-            result_file = self.result_var.get().strip() or datetime.now().strftime("ui_%Y%m%d_%H%M%S.txt")
+            # 结果文件名必须在交给引擎之前解析：引擎只认字面文件名，"+"/"-" 的特殊含义
+            # 由 Python 侧解释（见 main._resolve_result_file）。原来这里直接传原值，
+            # 于是把 "-" 当成文件名，在 out/ 下产生了一个名为 "-" 的文件。
+            # 空值也交给它处理（会得到时间戳名），不再另写一套默认值。
+            result_file = _resolve_result_file(self._selected_result_file())
             params = engine_runner._build_params(task, charset_hex, result_file)
             if self.stop_requested:
                 self.events.put(("finished", "已停止"))
