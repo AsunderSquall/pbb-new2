@@ -463,28 +463,38 @@ class Monitor(tk.Tk):
         )
         self.start_threads_spinbox.grid(row=3, column=0, sticky="w")
         ttk.Label(controls, text="活跃线程").grid(row=4, column=0, sticky="w", pady=(10, 2))
+        # 下限是 0：0 表示暂停计算（引擎侧把它当作"所有 worker 都睡"），
+        # 不是"非法值"。负数由 Spinbox 与 _apply_runtime_threads 双重拦下。
         self.runtime_threads_spinbox = ttk.Spinbox(
-            controls, from_=1, to=1, textvariable=self.runtime_threads_var,
+            controls, from_=0, to=0, textvariable=self.runtime_threads_var,
             width=8, command=self._apply_runtime_threads, state="disabled",
         )
         self.runtime_threads_spinbox.grid(row=5, column=0, sticky="w")
         self.runtime_threads_spinbox.bind("<Return>", self._apply_runtime_threads)
         self.runtime_threads_spinbox.bind("<FocusOut>", self._apply_runtime_threads)
-        ttk.Label(controls, text="结束范围").grid(row=6, column=0, sticky="w", pady=(10, 2))
-        ttk.Entry(controls, textvariable=self.range_var).grid(row=7, column=0, columnspan=2, sticky="ew")
-        ttk.Label(controls, text="结果文件").grid(row=8, column=0, sticky="w", pady=(10, 2))
+        # 手动输入数字后需要回车才生效，而界面没有任何提示；这里补一个显式的应用按钮，
+        # 并在下面加一行小字说明取值含义与生效方式（避免"为什么打了数字没反应"）。
+        self.apply_threads_button = ttk.Button(
+            controls, text="应用", command=self._apply_runtime_threads, state="disabled",
+        )
+        self.apply_threads_button.grid(row=5, column=1, sticky="ew", padx=(6, 0))
+        ttk.Label(controls, text="0 = 暂停计算；回车或点“应用”生效",
+                  font=(UI_FONT, 9)).grid(row=6, column=0, columnspan=2, sticky="w")
+        ttk.Label(controls, text="结束范围").grid(row=7, column=0, sticky="w", pady=(10, 2))
+        ttk.Entry(controls, textvariable=self.range_var).grid(row=8, column=0, columnspan=2, sticky="ew")
+        ttk.Label(controls, text="结果文件").grid(row=9, column=0, sticky="w", pady=(10, 2))
         self._build_main_result_file(controls)
         launch_options = ttk.Frame(controls)
-        launch_options.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        launch_options.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.resume_checkbutton = self._checkbutton(launch_options, "Resume 续测", self.resume_var)
         self.resume_checkbutton.pack(side="left")
         self.rebuild_checkbutton = self._checkbutton(launch_options, "Rebuild 引擎", self.rebuild_var)
         self.rebuild_checkbutton.pack(side="left", padx=(12, 0))
         self.start_button = ttk.Button(controls, text="开始", command=self._start)
-        self.start_button.grid(row=11, column=0, sticky="ew", pady=(10, 0))
+        self.start_button.grid(row=12, column=0, sticky="ew", pady=(10, 0))
         self.stop_button = ttk.Button(controls, text="停止", command=self._stop, state="disabled")
-        self.stop_button.grid(row=11, column=1, sticky="ew", padx=(6, 0), pady=(10, 0))
-        ttk.Button(controls, text="编辑配置", command=self._open_editor).grid(row=12, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.stop_button.grid(row=12, column=1, sticky="ew", padx=(6, 0), pady=(10, 0))
+        ttk.Button(controls, text="编辑配置", command=self._open_editor).grid(row=13, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         controls.columnconfigure(0, weight=1)
 
         # 提示文字：wraplength 是像素，写死会带来两个问题 ——
@@ -583,7 +593,7 @@ class Monitor(tk.Tk):
         初始为「时间戳」，与历史行为一致（以前默认填 ui_<时间戳>.txt）。
         """
         holder = ttk.Frame(controls)
-        holder.grid(row=9, column=0, columnspan=2, sticky="ew")
+        holder.grid(row=10, column=0, columnspan=2, sticky="ew")
         holder.columnconfigure(0, weight=1)
         holder.columnconfigure(1, weight=1)
 
@@ -1680,7 +1690,7 @@ class Monitor(tk.Tk):
         self.runtime_thread_limit = task["n_threads"]
         self.runtime_active_threads = self.runtime_thread_limit
         self.runtime_threads_var.set(str(self.runtime_thread_limit))
-        self.runtime_threads_spinbox.configure(to=self.runtime_thread_limit, state="normal")
+        self._set_threads_controls_enabled(True, self.runtime_thread_limit)
         self.start_threads_spinbox.configure(state="disabled")
         self.resume_checkbutton.configure(state="disabled")
         self.rebuild_checkbutton.configure(state="disabled")
@@ -1780,19 +1790,50 @@ class Monitor(tk.Tk):
         except OSError:
             pass
 
+    def _set_threads_controls_enabled(self, enabled: bool, limit: int = 0):
+        """统一启用/禁用「活跃线程」输入框与它的应用按钮。
+
+        两者必须同步（曾经只禁用输入框而按钮仍是可点的），所以集中到一处，
+        避免以后再加控件时漏掉其中一个。
+        """
+        state = "normal" if enabled else "disabled"
+        if enabled:
+            self.runtime_threads_spinbox.configure(from_=0, to=limit, state=state)
+        else:
+            self.runtime_threads_spinbox.configure(state=state)
+        self.apply_threads_button.configure(state=state)
+
     def _apply_runtime_threads(self, _event=None):
+        """把「活跃线程」输入框的值写进 out/.threads，运行时实时增减 worker。
+
+        取值 0 是**合法值**，表示暂停计算（引擎侧让所有 worker 睡下、生产者也不再投喂，
+        两者都进入真正的等待而不是空转）；恢复时填回正数即可，线程不会销毁。
+        因此下限是 0 而不是 1 —— 早期实现用 max(1, ...) 把 0 夹掉了，用户无法暂停。
+
+        越界或非数字一律显示错误并还原输入框，**不静默改成别的值**：
+        静默夹取会让界面显示一个用户没输入过的数字，看起来像"输入被吃了"。
+        """
         if not self.running or self.runtime_thread_limit < 1:
             return
+        raw = self.runtime_threads_var.get().strip()
         try:
-            requested = int(self.runtime_threads_var.get().strip())
+            requested = int(raw)
         except ValueError:
-            requested = self.runtime_active_threads
-        requested = max(1, min(requested, self.runtime_thread_limit))
+            self.runtime_threads_var.set(str(self.runtime_active_threads))
+            messagebox.showerror("无法调整线程", f"请输入 0 到 {self.runtime_thread_limit} 之间的整数，当前输入：{raw!r}")
+            return
+        if not 0 <= requested <= self.runtime_thread_limit:
+            self.runtime_threads_var.set(str(self.runtime_active_threads))
+            messagebox.showerror(
+                "无法调整线程",
+                f"活跃线程必须在 0 到 {self.runtime_thread_limit} 之间（0 = 暂停计算），当前输入：{requested}")
+            return
         try:
             self._write_runtime_threads(requested)
             self.runtime_active_threads = requested
             self.runtime_threads_var.set(str(requested))
-            self.status_var.set(f"活跃线程已调整为 {requested}")
+            self.status_var.set("活跃线程已暂停（0）" if requested == 0
+                                else f"活跃线程已调整为 {requested}")
         except OSError as exc:
             self.runtime_threads_var.set(str(self.runtime_active_threads))
             messagebox.showerror("无法调整线程", str(exc))
@@ -1933,7 +1974,7 @@ class Monitor(tk.Tk):
         self._clear_runtime_threads()
         self.runtime_thread_limit = 0
         self.runtime_active_threads = 0
-        self.runtime_threads_spinbox.configure(state="disabled")
+        self._set_threads_controls_enabled(False)
         self.start_threads_spinbox.configure(state="normal")
         self.resume_checkbutton.configure(state="normal")
         self.rebuild_checkbutton.configure(state="normal")

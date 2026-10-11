@@ -83,5 +83,57 @@ class RowDragTests(unittest.TestCase):
         self.assertIsNone(owner._drag_state)
 
 
+class RuntimeThreadTests(unittest.TestCase):
+    # 「活跃线程」的运行时可调逻辑。用 SimpleNamespace 当 owner，避免真起 Tk。
+    def make_owner(self, limit=32):
+        owner = SimpleNamespace(
+            running=True, runtime_thread_limit=limit, runtime_active_threads=limit,
+            runtime_threads_var=Mock(), status_var=Mock(), _write_runtime_threads=Mock(),
+        )
+        owner.runtime_threads_var.get.return_value = str(limit)
+        return owner
+
+    # 0 必须是合法值：它表示暂停计算（引擎侧让所有 worker 睡下、生产者休眠等待），
+    # 不是"非法输入"。早期实现用 max(1, min(...)) 把 0 夹成 1，用户根本无法暂停。
+    def test_zero_is_accepted_and_pauses(self):
+        owner = self.make_owner()
+        owner.runtime_threads_var.get.return_value = "0"
+        Monitor._apply_runtime_threads(owner)
+        owner._write_runtime_threads.assert_called_once_with(0)
+        self.assertEqual(owner.runtime_active_threads, 0)
+        # 状态栏要说清是"暂停"，不能只显示一个 0 让用户猜
+        self.assertIn("暂停", owner.status_var.set.call_args[0][0])
+
+    def test_upper_bound_and_normal_values(self):
+        for value in (1, 8, 32):
+            owner = self.make_owner()
+            owner.runtime_threads_var.get.return_value = str(value)
+            Monitor._apply_runtime_threads(owner)
+            owner._write_runtime_threads.assert_called_once_with(value)
+
+    # 越界或非数字：弹出错误并**还原输入框**，不能静默改成别的值 ——
+    # 静默夹取会让界面显示一个用户没输入过的数字，看起来像"输入被吃了"。
+    def test_out_of_range_reports_and_restores(self):
+        for raw in ("33", "-1", "abc", ""):
+            owner = self.make_owner()
+            owner.runtime_active_threads = 32
+            owner.runtime_threads_var.get.return_value = raw
+            with patch.object(ui.messagebox, "showerror") as error:
+                Monitor._apply_runtime_threads(owner)
+            error.assert_called_once()
+            owner._write_runtime_threads.assert_not_called()
+            owner.runtime_threads_var.set.assert_called_once_with("32")
+
+    # 未运行时（或还没拿到线程上限时）不该写控制文件，也不该弹窗。
+    def test_noop_when_not_running(self):
+        for running, limit in ((False, 32), (True, 0)):
+            owner = self.make_owner(limit=limit)
+            owner.running = running
+            with patch.object(ui.messagebox, "showerror") as error:
+                Monitor._apply_runtime_threads(owner)
+            owner._write_runtime_threads.assert_not_called()
+            error.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

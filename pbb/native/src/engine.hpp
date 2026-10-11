@@ -456,6 +456,17 @@ inline int engine_main(int argc,char**argv){
     // ---- task_id 序号生成器 ----
     int task_id_counter=0;
 
+    // 动态线程数: worker id >= target_threads 时该线程睡眠, 不取任务。
+    // 允许下调到 0 = 「暂停计算」: 此时所有 worker 都睡, 生产者也不再投喂
+    //   (见 threads_paused 与 prod 里的 wait_if_paused), 引擎进入空转等待而不烧 CPU。
+    // 线程一旦创建就不会销毁, 超额线程在每轮循环开头 sleep 后重新检查,
+    //   因此「调低再调高」可以恢复。
+    // 注意: 这几个变量必须声明在 prod 之前 —— prod 用 [&] 捕获它们。
+    std::atomic<int> target_threads{n_threads};
+    std::atomic<bool> threads_paused{false};
+    std::mutex pause_mtx;
+    std::condition_variable pause_cv;
+
     // ---- Producer: 生成任务 ----
     // 每个 chunk 的随机决策 (prefix/suffix 选择) 由其 chunk_seed 派生,
     // 不再共享 rng_global, 确保与执行顺序/线程数无关。
@@ -469,10 +480,21 @@ inline int engine_main(int argc,char**argv){
     //   * mode 4 = mode 2 的编码方式, 但 suffix_id = prefix_id (配对), 因此后缀不随机;
     //   * mode 2/3 用 chunk_seed 重建的局部 prng 选择 prefix/suffix —— 注意这里同时用了
     //     两次/三次 prng() 抽值, 抽取次数与顺序属于「随机结果的语义」, 不能重排或增减。
-    auto prod=[&]{
+        auto prod=[&]{
         // 用 q_add_or_stop 而不是 q_add: 队列满时会阻塞在条件变量上, 只有可中断的等待
         // 才能让"父进程消失后收尾"真正生效 (见 q_add_or_stop 的说明)。
         // 返回 false 表示应当停止投递 —— 直接收尾, 消费者会取完队列里剩下的任务后退出。
+        //
+        // 活跃线程被调成 0 时(threads_paused), 这里必须**真正睡下**而不是反复空转:
+        // 队列满 + workers 全睡的情况下, 空转会让生产者每秒醒来若干次白烧 CPU。
+        // 这里等 pause_cv, 由 reader_thread 在恢复线程数时唤醒。
+        auto wait_if_paused=[&]{
+            if(!threads_paused.load(std::memory_order_relaxed))return;
+            std::unique_lock lk(pause_mtx);
+            pause_cv.wait_for(lk,std::chrono::milliseconds(STOP_POLL_MS),
+                              [&]{return !threads_paused.load(std::memory_order_relaxed)
+                                        ||pbb_stop_requested();});
+        };
         auto put=[&](const TaskData& t){return q_add_or_stop(q,t);};
         bool stopped=false;
         auto stop=[&]{stopped=true;};
@@ -481,6 +503,8 @@ inline int engine_main(int argc,char**argv){
                 uint64_t pl=prefix_L[j], pr=prefix_R[j];
                 for(uint64_t i=pl;i<pr;i+=CHUNK_SIZE){
                     if(stopped)break;
+                    wait_if_paused();
+                    if(pbb_stop_requested()){stop();break;}
                     uint64_t tr=i+CHUNK_SIZE;if(tr>pr)tr=pr;
                     TaskData t;t.L=i;t.R=tr;t.type=mode;
                     t.prefix_id=j+1;
@@ -495,12 +519,16 @@ inline int engine_main(int argc,char**argv){
             if(mode==1)for(int j=0;j<np&&!stopped;j++)
                 for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
                     if(stopped)break;
+                    wait_if_paused();
+                    if(pbb_stop_requested()){stop();break;}
                     uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
                     TaskData t;t.L=i;t.R=tr;t.type=1;t.prefix_id=j+1;t.suffix_id=(j%ns)+1;
                     t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
                     if(!put(t)){stop();break;}}
             else for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
                 if(stopped)break;
+                wait_if_paused();
+                if(pbb_stop_requested()){stop();break;}
                 uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
                 TaskData t;t.L=i;t.R=tr;t.type=mode;
                 t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
@@ -520,11 +548,6 @@ inline int engine_main(int argc,char**argv){
     //   consume_mode1() — mode 1 进位检测 + 顺序编码
     //   consume_mode24()— mode 2/4 随机前缀/LR + 顺序编码
     //   consume_mode3() — mode 3 随机前缀 + 随机逐位编码
-
-    // 动态线程数: worker id >= target_threads 时该线程睡眠, 不取任务
-    // 只允许下调 (reader_thread 校验 1 <= val <= n_threads): 线程一旦创建就不会销毁,
-    //   超额线程在每轮循环开头 sleep 500ms 后重新检查, 因此「调低再调高」可以恢复。
-    std::atomic<int> target_threads{n_threads};
 
     // ---- 消费者主体 ----
     // BATCH_WIDTH=4 是评分内核的硬约束: load_name_batch4 / calc_skills_batch4 /
@@ -897,11 +920,15 @@ inline int engine_main(int argc,char**argv){
             FILE* f = fopen(ctl_path.c_str(), "r");
             if(!f) continue;
             int val = -1;
-            if(fscanf(f, "%d", &val) == 1 && val >= 1 && val <= n_threads && val != last_val){
+            // 允许 0 (暂停) ~ n_threads。0 是合法值: 用于临时挂起计算而不结束任务,
+            // 恢复时写回正数即可 (线程不会销毁, 只是不取任务)。
+            if(fscanf(f, "%d", &val) == 1 && val >= 0 && val <= n_threads && val != last_val){
                 target_threads.store(val);
-                fprintf(stderr, "\n[engine] threads → %d\n", val);
+                threads_paused.store(val == 0);
+                fprintf(stderr, "\n[engine] threads → %d%s\n", val, val == 0 ? " (paused)" : "");
                 fflush(stderr);
                 last_val = val;
+                if(val > 0) pause_cv.notify_all();   // 唤醒等待中的生产者/消费者
             }
             fclose(f);
         }
