@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pbb import _build as build
 from pbb import build_settings, paths
+from _archive import write_zip_atomic
 import package_release
 
 
