@@ -166,6 +166,64 @@ class AffixEditorTests(unittest.TestCase):
         app.editor_vars['character_set.single_char_length'].set('1');app._refresh_charset_types()
         self.assertEqual(app._editor_config()['character_set']['types'],[3,1])
 
+    # score_list 由界面自动维护：在某族上填了正阈值，保存时该族必须自动进入 score_list。
+    #
+    # 背景：校验规则要求"阈值>0 ⇒ 该族必须在 score_list 里"（否则设了阈值却不计算，
+    # 门控形同虚设）。但界面上每族都有独立的阈值输入框，用户填了 CQD 阈值却被告知
+    # 还得自己去改 score_list 那串族名 —— 那等于把内部一致性的负担推给用户，
+    # 而且不满足时监控器还会直接退出（见 ConfigLocationTests 里那条闪退回归）。
+    # 现在由 _effective_score_list() 自动补齐，并在保存前同步回输入框让用户看到结果。
+    def test_threshold_auto_adds_family_to_score_list(self):
+        app = self.app
+        app.editor_vars["collection.score_list"].set("qp,qd,cp,fp,wc,fs,pj")
+        for family in ui.FAMILIES:
+            app.editor_vars[f"collection.min_{family}"].set("0")
+        app.editor_vars["collection.min_cqd"].set("4000")
+
+        cfg = app._editor_config()
+        self.assertEqual(cfg["collection"]["score_list"], "qp,qd,cqd,cp,fp,wc,fs,pj")
+        # 界面上的输入框也要跟着更新，否则用户看到的还是旧值。
+        self.assertEqual(app.editor_vars["collection.score_list"].get(),
+                         "qp,qd,cqd,cp,fp,wc,fs,pj")
+
+    # 已有族不重复追加；顺序统一按 FAMILIES 规范序，避免同一份配置因书写顺序不同
+    # 而反复产生 diff。
+    def test_score_list_deduplicates_and_normalizes_order(self):
+        app = self.app
+        app.editor_vars["collection.score_list"].set("fs,fs,rh,qp")
+        # min_* 与 ptt_* 都要清零：两者都代表"要算这一族"，只清一个会被自动补回来。
+        for family in ui.FAMILIES:
+            app.editor_vars[f"collection.min_{family}"].set("0")
+        for family in ("cp", "fp", "wc", "fs", "pj"):
+            app.editor_vars[f"collection.ptt_{family}"].set("0")
+        cfg = app._editor_config()
+        # rh 归一到 fs 且只出现一次；结果按规范序（qp 在 fs 之前）。
+        self.assertEqual(cfg["collection"]["score_list"], "qp,fs")
+
+    # PTT 阈值同样代表"要算这一族"，也必须触发纳入（否则 ptt_* 门控会失效）。
+    def test_ptt_threshold_also_adds_family(self):
+        app = self.app
+        app.editor_vars["collection.score_list"].set("qp,qd,cp,fp,wc,pj")
+        for family in ui.FAMILIES:
+            app.editor_vars[f"collection.min_{family}"].set("0")
+        for family in ("cp", "fp", "wc", "fs", "pj"):
+            app.editor_vars[f"collection.ptt_{family}"].set("0")
+        app.editor_vars["collection.ptt_fs"].set("4300")
+        cfg = app._editor_config()
+        self.assertIn("fs", cfg["collection"]["score_list"].split(","))
+
+    # 反向也要成立：把阈值改回 0 并删掉该族，才能真正停算它 —— 自动补齐不能把
+    # 用户的显式选择又加回来。
+    def test_zero_threshold_lets_family_be_removed(self):
+        app = self.app
+        for family in ui.FAMILIES:
+            app.editor_vars[f"collection.min_{family}"].set("0")
+        for family in ("cp", "fp", "wc", "fs", "pj"):
+            app.editor_vars[f"collection.ptt_{family}"].set("0")
+        app.editor_vars["collection.score_list"].set("qp,cp,fp,wc,fs,pj")
+        cfg = app._editor_config()
+        self.assertNotIn("qd", cfg["collection"]["score_list"].split(","))
+
 
 if __name__ == "__main__":
     unittest.main()

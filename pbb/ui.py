@@ -42,6 +42,9 @@ ICON_FILE = str(paths.ICON_FILE)
 ICON_PNG_FILE = str(paths.ICON_PNG_FILE)
 APP_USER_MODEL_ID = "pbb.name.search.monitor.v3"
 FAMILIES = ("qp", "qd", "pp", "pd", "cqd", "cp", "fp", "wc", "fs", "pj")
+# score_list 里允许出现的别名：rh（人海）等价于 fs。归一逻辑集中在 _normalize_score_list，
+# 避免"编辑器的归一"和"排行榜的归一"各写一套而漂移。
+_FAMILY_ALIASES = {"rh": "fs"}
 ENUMERATION_MODES = {
     "顺序枚举": 1,
     "随机区间": 2,
@@ -68,6 +71,22 @@ PROGRESS_RE = re.compile(
 )
 COUNT_RE = re.compile(r"count:([0-9.]+)T")
 CURRENT_RE = re.compile(r"cur_speed:([0-9.]+)T/d")
+
+
+def _normalize_score_list(raw) -> list[str]:
+    """把 score_list 的原始写法归一成有序的族名列表（``rh`` → ``fs``、去重、丢弃无效项）。
+
+    空结果表示"全十族"的语义由调用方决定（编辑器会写成空串，排行榜会展开成全十族）。
+    """
+    if isinstance(raw, (list, tuple)):
+        raw = ",".join(str(item) for item in raw)
+    result: list[str] = []
+    for part in str(raw or "").split(","):
+        name = part.strip().lower()
+        name = _FAMILY_ALIASES.get(name, name)
+        if name in FAMILIES and name not in result:
+            result.append(name)
+    return result
 
 
 def load_config(path: str) -> dict:
@@ -1163,7 +1182,10 @@ class Monitor(tk.Tk):
             cfg["collection"][f"min_{family}"] = integer(f"collection.min_{family}")
         for family in ("cp", "fp", "wc", "fs", "pj"):
             cfg["collection"][f"ptt_{family}"] = integer(f"collection.ptt_{family}")
-        cfg["collection"]["score_list"] = self.editor_vars["collection.score_list"].get().strip()
+        # score_list 由界面自动维护（见 _effective_score_list）：用户在某族上填了正阈值，
+        # 就说明该族要被计算，不必再去手改这一串族名。同步回输入框，让界面显示真实结果。
+        cfg["collection"]["score_list"] = self._effective_score_list(cfg)
+        self.editor_vars["collection.score_list"].set(cfg["collection"]["score_list"])
         cfg["collection"]["score_mode"] = self.editor_choice_maps["collection.score_mode"][self.editor_vars["collection.score_mode"].get()]
         cfg["collection"]["collect_mode"] = self.editor_choice_maps["collection.collect_mode"][self.editor_vars["collection.collect_mode"].get()]
         cfg["output"]["result_file"] = self.editor_vars["output.result_file"].get().strip()
@@ -1171,6 +1193,32 @@ class Monitor(tk.Tk):
         cfg["output"]["log_output"] = int(self.editor_vars["output.log_output"].get())
         cfg["output"]["speed_output"] = int(self.editor_vars["output.speed_output"].get())
         return cfg
+
+    def _effective_score_list(self, cfg: dict) -> str:
+        """返回应该生效的 ``collection.score_list``：凡填了正阈值的族一律纳入。
+
+        **为什么要在界面层做这件事**：编辑器上每一族都有「最低 XX」输入框，用户在某族上
+        填了非零阈值，意思就是"我要算这一族"。但校验规则要求「阈值 >0 ⇒ 该族必须在
+        score_list 里」（否则设了阈值却不计算，门控形同虚设），于是用户会被一个看不见的
+        内部约束拦住 —— 还得自己去手改 ``score_list`` 那串族名。这是把内部一致性的负担
+        推给了用户，所以改由界面维护。
+
+        规则：
+          - 用户已写的族名做归一（``rh`` → ``fs``、丢弃无法识别的项、去重），
+            空列表仍表示"全十族"；
+          - 再把「正阈值（``min_*`` 或 ``ptt_*``）却没在列表里的族」补进来；
+          - 结果统一按 FAMILIES 的规范顺序排列 —— 与引擎的输出列序一致，便于阅读比对，
+            也不影响计算（引擎本来就不看这串名字的顺序）；
+          - 要真正停算某族，把它的阈值改回 0 再把它从这串里删掉即可。
+        """
+        collection = cfg.get("collection", {})
+        normalized = _normalize_score_list(self.editor_vars["collection.score_list"].get())
+        for family in FAMILIES:
+            thresholds = (collection.get(f"min_{family}", 0), collection.get(f"ptt_{family}", 0))
+            if any(isinstance(value, int) and value > 0 for value in thresholds):
+                if family not in normalized:
+                    normalized.append(family)
+        return ",".join(family for family in FAMILIES if family in normalized)
 
     def _save_editor(self, start=False, to_default=False):
         """保存编辑器内容。两个保存目标对应界面上两个按钮：
@@ -1395,7 +1443,7 @@ class Monitor(tk.Tk):
         chosen = [part.strip().lower() for part in str(raw).split(",") if part.strip()]
         if not chosen:
             return list(FAMILIES)
-        return ["fs" if name == "rh" else name for name in chosen if name in FAMILIES or name == "rh"]
+        return _normalize_score_list(raw)
 
     def _drain_events(self):
         """主线程侧的队列消费者：把工作线程的消息刷成界面更新。
