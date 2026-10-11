@@ -411,9 +411,13 @@ class Monitor(tk.Tk):
         self.rebuild_requested = False
         self.resume_var = tk.BooleanVar(value=False)
         self.rebuild_var = tk.BooleanVar(value=False)
+        # 关闭状态与 after 记账表必须在 _build_layout() 之前初始化：
+        # 布局构建过程里就会调用 _schedule_after（例如排行榜的换行绑定）。
+        self._closing = False
+        self._after_ids: set[str] = set()
         self._build_layout()
         self._apply_theme()
-        self.after(150, self._drain_events)
+        self._schedule_after(150, self._drain_events)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
     def _build_layout(self):
@@ -1880,7 +1884,8 @@ class Monitor(tk.Tk):
             self.boards_dirty = False
             self.last_board_refresh = time.monotonic()
         # Never monopolize Tk's event loop when the engine writes progress fast.
-        self.after(50 if self.running else 150, self._drain_events)
+        # 用 _schedule_after 记账，关闭时才能把这些待执行回调取消掉（见 _close）。
+        self._schedule_after(50 if self.running else 150, self._drain_events)
 
     def _handle_line(self, line: str):
         """解析引擎的一行 stderr 输出：UI_TOP 协议、进度行、计数行与 SIMD 提示。
@@ -1960,7 +1965,7 @@ class Monitor(tk.Tk):
         self.status_var.set("正在停止引擎..." if self.proc else "正在取消启动...")
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
-            self.after(1500, self._force_stop, self.proc)
+            self._schedule_after(1500, self._force_stop, self.proc)
 
     def _force_stop(self, proc: subprocess.Popen):
         if proc is self.proc and proc.poll() is None:
@@ -1982,9 +1987,63 @@ class Monitor(tk.Tk):
         self.stop_button.configure(state="disabled")
         self.status_var.set(status)
 
+    def _schedule_after(self, delay_ms: int, callback, *args) -> str:
+        """``after`` 的记账版本：记录 id，便于关闭时统一取消。
+
+        **为什么必须记账**：Tk 的 ``after`` 回调在窗口销毁后**仍会被执行**，此时回调里
+        引用的控件已不存在，Tk 抛 ``invalid command name "..."``。在冻结的 windowed 应用
+        里这个 Tcl 错误会弹**模态错误框** —— 窗口已经消失，用户看不到它，于是主循环
+        永不返回，进程一直留在任务管理器里（表现为"关了 UI 还残留 PBBMonitor"）。
+
+        这里同时用 ``_closing`` 兜底：关闭过程中不再安排新的回调（``_drain_events``
+        会在每个周期末尾重排自己，不拦就会源源不断地产生新的待执行回调）。
+        """
+        if self._closing:
+            return ""
+        after_id = self.after(delay_ms, callback, *args)
+        self._after_ids.add(after_id)
+        return after_id
+
+    def _cancel_scheduled_after(self):
+        """取消本窗口所有已记账、尚未执行的 ``after`` 回调。"""
+        for after_id in tuple(self._after_ids):
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._after_ids.clear()
+
     def _close(self):
+        """关闭主窗口：停止任务 → 结束主循环 → 销毁窗口。
+
+        顺序与每一步的必要性（都经过实测，不是照抄惯例）：
+
+        1. ``_closing = True``：让 ``_drain_events`` 停止自我重排。
+        2. ``_cancel_scheduled_after()``：**必须取消待执行的 after 回调**。Tk 在窗口
+           销毁后仍会执行已排队的 after，此时回调引用的控件已不存在，会报
+           ``invalid command name "..."``。
+        3. ``_stop()`` + 直接 ``kill()`` 引擎：``_stop()`` 走的是 ``terminate()`` +
+           ``after(1500)`` 兜底，而窗口随即销毁、那个兜底回调不会执行；用户点关闭就该
+           立刻停，不必依赖引擎自己的父进程监视（那要 1~2 秒）。
+        4. ``quit()`` **再** ``destroy()``：**这一步是残留的根因**。
+           实测只调 ``destroy()`` 时 ``mainloop()`` 并不返回，进程会一直留在任务管理器
+           里（窗口已消失，用户看不到任何提示）；先 ``quit()`` 显式结束主循环，再
+           ``destroy()`` 释放窗口，才能干净退出。
+        """
+        self._closing = True
+        self._cancel_scheduled_after()
         self._stop()
-        self.destroy()
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        # quit() 结束 mainloop —— 只 destroy() 时 mainloop 不返回，进程会残留。
+        try:
+            self.quit()
+        finally:
+            self.destroy()
 
 
 if __name__ == "__main__":

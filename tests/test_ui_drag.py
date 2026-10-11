@@ -135,5 +135,53 @@ class RuntimeThreadTests(unittest.TestCase):
             error.assert_not_called()
 
 
+class CloseTests(unittest.TestCase):
+    # 关闭窗口必须结束 mainloop，否则进程会留在任务管理器里（"关了 UI 还残留
+    # PBBMonitor"）。实测：只调 destroy() 时 mainloop() 不返回；必须 quit()。
+    # 这条断言直接锁住这个关键调用，防止以后被"简化"掉。
+    def test_close_quits_mainloop(self):
+        owner = SimpleNamespace(
+            _closing=False, _after_ids=set(),
+            _cancel_scheduled_after=Mock(), _stop=Mock(),
+            proc=None, quit=Mock(), destroy=Mock(),
+        )
+        Monitor._close(owner)
+        owner.quit.assert_called_once()
+        owner.destroy.assert_called_once()
+        self.assertTrue(owner._closing)
+
+    # 关闭时若还有引擎在跑，必须立刻结束它：_stop() 走的是 terminate() + after(1500)
+    # 兜底，而窗口随即销毁，那个兜底回调不会执行。
+    def test_close_kills_running_engine(self):
+        proc = Mock()
+        proc.poll.return_value = None
+        owner = SimpleNamespace(
+            _closing=False, _after_ids=set(),
+            _cancel_scheduled_after=Mock(), _stop=Mock(),
+            proc=proc, quit=Mock(), destroy=Mock(),
+        )
+        Monitor._close(owner)
+        proc.kill.assert_called_once()
+
+    # _schedule_after 必须记账，关闭时才能取消；关闭过程中不再安排新回调。
+    def test_schedule_after_is_tracked_and_stops_when_closing(self):
+        owner = SimpleNamespace(_closing=False, _after_ids=set(),
+                                after=Mock(return_value="after#1"))
+        after_id = Monitor._schedule_after(owner, 100, lambda: None)
+        self.assertEqual(after_id, "after#1")
+        self.assertEqual(owner._after_ids, {"after#1"})
+
+        owner._closing = True
+        self.assertEqual(Monitor._schedule_after(owner, 100, lambda: None), "")
+        self.assertEqual(owner.after.call_count, 1)
+
+    # 取消时要清空记账表，避免 id 无限累积（每次都重排 _drain_events）。
+    def test_cancel_scheduled_after_clears_tracking(self):
+        owner = SimpleNamespace(_closing=False, _after_ids={"a", "b"}, after_cancel=Mock())
+        Monitor._cancel_scheduled_after(owner)
+        self.assertEqual(owner.after_cancel.call_count, 2)
+        self.assertEqual(owner._after_ids, set())
+
+
 if __name__ == "__main__":
     unittest.main()
