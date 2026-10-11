@@ -287,47 +287,69 @@ def configure_windows_identity():
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
 
 
-def apply_windows_window_icon(window):
-    """给窗口同时设置大小两个原生图标槽位，保证标题栏与任务栏图标一致。
+def _top_level_hwnd(window) -> int:
+    """返回承载窗口图标与任务栏按钮的**顶层** HWND。
 
-    Tk 的 iconphoto 不总能传递到 Windows 任务栏，因此直接对 HWND 发 WM_SETICON：
-    先按当前 DPI 的 SM_CXICON 尺寸加载同一个 .ico 到两个槽位，加载句柄缓存到窗口对象上，
-    避免被 GC 回收（句柄失效会导致图标变回默认）。
+    **为什么不能直接用 winfo_id()**：Tk 的 ``winfo_id()`` 返回的是 toplevel 内部的
+    子窗口，而 Windows 的任务栏与标题栏读的是它外面那层 wrapper（``GetParent``）。
+    实测：图标设在 ``winfo_id()`` 上时，wrapper 的 ``WM_GETICON`` 两个槽位仍是旧句柄，
+    任务栏因此继续显示旧图标。所以必须一路向上取到没有父窗口的那一层。
+    """
+    import ctypes
+    user32 = ctypes.windll.user32
+    hwnd = window.winfo_id()
+    while True:
+        parent = user32.GetParent(hwnd)
+        if not parent:
+            return hwnd
+        hwnd = parent
+
+
+def apply_windows_window_icon(window):
+    """把随包 .ico 设到窗口的**顶层 HWND**，让标题栏与任务栏图标一致。
+
+    Tk 的 ``iconphoto`` 不保证传到 Windows 任务栏，所以直接在 HWND 上设 WM_SETICON。
+    两个槽位分别使用各自的标准尺寸，否则会被系统缩放而发糊：
+
+      * ``ICON_SMALL`` —— 任务栏/标题栏小图标，尺寸取 ``SM_CXSMICON``（本机 24px）；
+      * ``ICON_BIG``   —— Alt+Tab / 任务切换大图标，尺寸取 ``SM_CXICON``（本机 48px）。
+
+    早期实现把 ``SM_CXICON``(48) 同时塞进两个槽位，小图标槽位被从 48 缩到 24，
+    是"任务栏图标不对"的原因之一；另一个原因是设在了子窗口上（见 _top_level_hwnd）。
+
+    句柄缓存在 ``window._native_icon_handles`` 上，避免被 GC 回收导致图标回落默认值。
     """
     if sys.platform != "win32" or not os.path.exists(ICON_FILE):
         return
     import ctypes
-    # Tk's iconphoto is not always propagated to the Windows taskbar.  Set both
-    # native icon slots on the HWND so taskbar and title bar share the same ICO.
-    image_icon = 1
-    load_from_file = 0x0010
-    wm_seticon = 0x0080
+    image_icon = 1           # IMAGE_ICON
+    load_from_file = 0x0010  # LR_LOADFROMFILE
+    wm_seticon = 0x0080      # WM_SETICON
     user32 = ctypes.windll.user32
-    taskbar_size = user32.GetSystemMetrics(11)  # SM_CXICON: 32/48/64 by DPI
-    # Taskbar implementations may query either icon slot.  Supplying a 16px
-    # small icon here lets it be selected and then enlarged, so both slots use
-    # the same DPI-matched taskbar source instead.
-    small = user32.LoadImageW(
-        None,
-        ICON_FILE,
-        image_icon,
-        taskbar_size,
-        taskbar_size,
-        load_from_file,
-    )
-    large = user32.LoadImageW(
-        None,
-        ICON_FILE,
-        image_icon,
-        taskbar_size,
-        taskbar_size,
-        load_from_file,
-    )
+
+    small_size = user32.GetSystemMetrics(49)   # SM_CXSMICON
+    large_size = user32.GetSystemMetrics(11)   # SM_CXICON
+    small = user32.LoadImageW(None, ICON_FILE, image_icon, small_size, small_size, load_from_file)
+    large = user32.LoadImageW(None, ICON_FILE, image_icon, large_size, large_size, load_from_file)
+
+    target = _top_level_hwnd(window)
     if small:
-        user32.SendMessageW(window.winfo_id(), wm_seticon, 0, small)
+        user32.SendMessageW(target, wm_seticon, 0, small)
     if large:
-        user32.SendMessageW(window.winfo_id(), wm_seticon, 1, large)
-    window._native_icon_handles = (small, large)
+        user32.SendMessageW(target, wm_seticon, 1, large)
+
+    # 类图标也要换：部分外壳（含任务栏缩略图）优先读类图标，只设 WM_SETICON 时
+    # 仍可能显示旧图标。
+    try:
+        gdi32 = ctypes.windll.gdi32
+        if large:
+            gdi32.SetClassLongPtrW(target, -14, large)   # GCLP_HICON
+        if small:
+            gdi32.SetClassLongPtrW(target, -34, small)   # GCLP_HICONSM
+    except Exception:
+        pass
+
+    window._native_icon_handles = (small, large, target)
 
 
 class Monitor(tk.Tk):
@@ -838,26 +860,43 @@ class Monitor(tk.Tk):
         幂等：同一个控件只绑一次（用 ``_wheel_bound`` 记录），避免重复调用把回调叠加
         多次 —— 那会让一次滚轮滚动多倍距离。
 
-        两处不接管滚轮：
-          - ``tk.Text`` 自己有滚动余量时优先滚它自己（编辑器里有多行文本框），
-            滚到头才交回外层 canvas，避免"内外一起滚"；
-          - ``ttk.Combobox`` 的滚轮用于切换选项，交给它自己。
+        设计要点（都来自实测，不要"简化"）：
+
+        * **Tk 事件不冒泡**。鼠标事件只发给光标下的那个控件，所以必须在整个子树上逐个
+          绑定；也正因如此，"滚不动就让事件传给父级"是不成立的 —— 事件会直接消失。
+          因此文本控件滚不动时必须**显式调用**外层 canvas 的滚动，而不是 return None。
+        * ``tk.Text`` 优先滚自己（编辑器里的多行输入框），滚到头再滚外层。
+        * ``ttk.Combobox`` 的滚轮用于切换选项，交给它自己，不接管。
+        * ``state="disabled"`` 的 ``tk.Text``（例如排行榜里的 Top 5 只读框）纵向本来
+          就不滚，应当把滚轮完全让给外层 —— 这也是"鼠标放进文字框滚轮就失效"的根因。
         """
         def scroll_units(event):
             """把 Windows 的 wheel delta 换算成滚动行数（delta=120 即一行）。"""
             steps = int(event.delta / 120)
             return -steps if steps else (-1 if event.delta < 0 else 1)
 
-        def on_wheel(event):
+        def scroll_outer(event):
+            """显式滚动外层 canvas（替代依赖事件冒泡的做法）。"""
             canvas.yview_scroll(scroll_units(event), "units")
             return "break"
 
+        def on_wheel(event):
+            return scroll_outer(event)
+
         def on_text_wheel(event, text):
-            first, last = text.yview()
-            if (event.delta < 0 and last < 1.0) or (event.delta > 0 and first > 0.0):
-                text.yview_scroll(scroll_units(event), "units")
-                return "break"
-            return None      # 文本已滚到底/顶，放行给外层 canvas
+            """文本控件优先滚自己；滚不动则显式滚外层。
+
+            disabled 的 Text 直接跳到自己那步（它纵向不可滚，滚它会报错或被忽略），
+            让滚轮完全用于外层列表。
+            """
+            if str(text.cget("state")) != "disabled":
+                first, last = text.yview()
+                can_scroll = (event.delta < 0 and last < 1.0) or (event.delta > 0 and first > 0.0)
+                if can_scroll:
+                    text.yview_scroll(scroll_units(event), "units")
+                    return "break"
+            # 自己滚不动（或本来不可滚）→ 显式交给外层
+            return scroll_outer(event)
 
         bound = self._wheel_bound.setdefault(str(canvas), set())
 

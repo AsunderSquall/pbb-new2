@@ -298,6 +298,38 @@ class AffixEditorTests(unittest.TestCase):
         self.assertEqual(ui.pixels(390), round(390 * scale))
         self.assertGreaterEqual(ui.pixels(1), 1)
 
+    # 鼠标停在滚动区域内的 tk.Text 上时，滚轮必须仍然滚动**外层** canvas。
+    #
+    # 背景：原先 on_text_wheel 在"文本滚不动"时 return None，指望事件冒泡到 canvas；
+    # 但 Tk 的事件不冒泡，事件就此丢失 —— 表现为"展开 Top5 后鼠标放进文字框就滚不动"。
+    # 现在必须显式调用外层滚动。这里直接取出绑定的回调并调用，验证滚动确实发生。
+    def test_wheel_over_text_scrolls_outer_canvas(self):
+        app = self.app
+        canvas = app._canvas_of(app.prefix_rows_frame)
+        self.assertIsNotNone(canvas)
+        # 排行榜 Top5 用的就是这种只读多行框
+        text = tk.Text(app.prefix_rows_frame, height=6, wrap="none", state="disabled")
+        text.pack()
+        app.update_idletasks()
+        app._bind_wheel(canvas, app.prefix_rows_frame)
+        self.assertTrue(text.bind("<MouseWheel>"), "只读 Text 没有被绑定滚轮")
+
+        # 直接观察外层是否被要求滚动。用替身代替真实滚动：
+        # 真实滚动量取决于布局算出来的可见高度，在测试窗口里不稳定；
+        # 这里要断言的是"事件路由到了外层"这件事本身。
+        calls = []
+        original = canvas.yview_scroll
+        canvas.yview_scroll = lambda *args: calls.append(args)
+        try:
+            app.tk.call("event", "generate", str(text), "<MouseWheel>", "-delta", -120)
+            app.update_idletasks()
+        finally:
+            canvas.yview_scroll = original
+
+        self.assertTrue(calls, "鼠标停在只读 Text 上时，外层 canvas 没有被滚动")
+        # 向下滚一格：-delta 120 -> 参数 (1, "units")
+        self.assertEqual(calls[0], (1, "units"))
+
 
 if __name__ == "__main__":
     unittest.main()
