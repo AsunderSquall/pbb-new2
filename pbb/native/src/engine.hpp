@@ -42,6 +42,13 @@
 #include <unordered_map>
 #include <cstdlib>
 #include <limits>
+#include <csignal>
+#if defined(_WIN32)
+#  include <windows.h>
+#  include <tlhelp32.h>
+#else
+#  include <unistd.h>
+#endif
 
 #ifndef PBB_UI_ENGINE
 #define PBB_UI_ENGINE 0
@@ -60,6 +67,74 @@
 //          客户端拿到一个 task 后, 在本进程内再被切成多个 chunk 并行
 // 二者是同一抽象的两层, 不可混用。本宏仅指 chunk。
 #define CHUNK_SIZE 1000000ULL  // 每个 chunk 处理的名字数 (引擎内部线程级单位)
+
+// ---- 父进程消失时自动收尾 (守护) ----
+// 为什么需要: 引擎是 Python 的子进程, 一旦父进程异常退出 (监控器崩溃 / 被强杀 /
+// 任务管理器结束进程), 引擎会继续跑下去 —— 用户以为已经停了, 实际还在满核烧 CPU。
+//
+// 做法: 派生一个守护线程监视父进程, 父进程一消失就置 g_stop_requested;
+// 生产者不再投递新 chunk, 消费者做完手上这个 chunk 后退出, 主线程 join 收尾并照常
+// 打印 SUMMARY。这样既能自己停下, 也不丢已经算完的结果与统计。
+//
+// 只在 chunk 边界响应 (一个 chunk 约 1 秒), 因此不会打断正在计算的结果。
+static std::atomic<bool> g_stop_requested{false};
+
+static inline bool pbb_stop_requested(){
+    return g_stop_requested.load(std::memory_order_relaxed);
+}
+
+#if defined(_WIN32)
+// 取父进程 pid。Windows 没有 getppid(), 用 Toolhelp 快照按「本进程的父 pid」查。
+static DWORD pbb_parent_pid(){
+    HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+    if(snap==INVALID_HANDLE_VALUE)return 0;
+    PROCESSENTRY32W pe{};pe.dwSize=sizeof(pe);
+    DWORD self=GetCurrentProcessId(),parent=0;
+    if(Process32FirstW(snap,&pe)){
+        do{
+            if(pe.th32ProcessID==self){parent=pe.th32ParentProcessID;break;}
+        }while(Process32NextW(snap,&pe));
+    }
+    CloseHandle(snap);
+    return parent;
+}
+
+// 父进程是否仍然存活。WaitForSingleObject(handle,0) 立即返回:
+//   WAIT_TIMEOUT = 仍在运行; WAIT_OBJECT_0 = 已退出。
+// 句柄只需 SYNCHRONIZE 权限, 不需要 PROCESS_QUERY_INFORMATION。
+static bool pbb_parent_alive(){
+    static const DWORD parent_pid=pbb_parent_pid();
+    if(parent_pid==0)return true;              // 查不到就不监视, 绝不误杀任务
+    static HANDLE h=OpenProcess(SYNCHRONIZE,FALSE,parent_pid);
+    if(h==nullptr)return true;
+    return WaitForSingleObject(h,0)==WAIT_TIMEOUT;
+}
+#else
+// POSIX: 父进程消失后本进程被 init 收养, getppid() 变成 1。
+static bool pbb_parent_alive(){
+    static const pid_t original=getppid();
+    pid_t now=getppid();
+    return now==original&&now>1;
+}
+#endif
+
+// 启动父进程监视线程 (detach 的守护线程, 进程退出时自动清理)。
+// 每秒检查一次: 轮询几乎不耗资源, 1 秒内的收尾延迟对用户无感。
+// 同时接管 SIGTERM/SIGINT: 父进程若用 terminate() 优雅停止, 我们置同一个标志走同一条
+// 收尾路径, 而不是被默认动作直接杀掉 —— 那样既丢 SUMMARY 也丢已写的结果。
+static void pbb_start_parent_watchdog(){
+    std::signal(SIGTERM,[](int){g_stop_requested.store(true,std::memory_order_relaxed);});
+    std::signal(SIGINT, [](int){g_stop_requested.store(true,std::memory_order_relaxed);});
+    std::thread([]{
+        while(!pbb_stop_requested()){
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            if(!pbb_parent_alive()){
+                g_stop_requested.store(true,std::memory_order_relaxed);
+                return;
+            }
+        }
+    }).detach();
+}
 
 // ---- 确定性子种子派生 (splitmix64) ----
 // 由 (g_seed, task_id) 混合出每个 chunk 的专属种子。
@@ -95,6 +170,28 @@ struct TaskQueue{TaskData d[MAX_QUEUE_LEN];int h=0,t=0;bool closed=false;std::mu
 static void q_add(TaskQueue& q,const TaskData& d){std::unique_lock lk(q.mtx);q.cv_add.wait(lk,[&]{return q.t-q.h<MAX_QUEUE_LEN||q.closed;});if(!q.closed){q.d[q.t++%MAX_QUEUE_LEN]=d;q.cv_get.notify_one();}}
 static bool q_get(TaskQueue& q,TaskData& d){std::unique_lock lk(q.mtx);q.cv_get.wait(lk,[&]{return q.h<q.t||q.closed;});if(q.closed&&q.h>=q.t)return false;d=q.d[q.h++%MAX_QUEUE_LEN];q.cv_add.notify_one();return true;}
 static void q_close(TaskQueue& q){std::unique_lock lk(q.mtx);q.closed=true;q.cv_add.notify_all();q.cv_get.notify_all();}
+
+// 可被 g_stop_requested 打断的 q_add —— 生产者必须用它。
+//
+// 为什么不能只靠"投递前查一次停止标志": q_add 会在队列满时**阻塞**等待消费者腾位,
+// 一旦阻塞就再也走不到检查点。实测中 64 位无上界范围(2^64 个 chunk)下正是这种情况:
+// 队列只有 MAX_QUEUE_LEN=4 个槽, 生产者瞬间填满后永久卡在条件变量上, 父进程的停止
+// 请求于是永远得不到执行。
+//
+// 做法: 用 wait_for 定期醒来重查停止标志, 使阻塞等待变成可中断的等待。
+// 队列持续满时, 条件唤醒延迟最多 STOP_POLL_MS —— 对"父进程消失后 1 秒内收尾"无影响。
+static constexpr int STOP_POLL_MS=500;
+static bool q_add_or_stop(TaskQueue& q,const TaskData& d){
+    std::unique_lock lk(q.mtx);
+    while(q.t-q.h>=MAX_QUEUE_LEN&&!q.closed){
+        q.cv_add.wait_for(lk,std::chrono::milliseconds(STOP_POLL_MS));
+        if(pbb_stop_requested())return false;   // 停止请求优先于投递
+    }
+    if(q.closed||pbb_stop_requested())return false;
+    q.d[q.t++%MAX_QUEUE_LEN]=d;
+    q.cv_get.notify_one();
+    return true;
+}
 
 // hex 字符串 → 字节流 (charset_bytes 解码)
 // Python 侧把字符集字节流编码成十六进制以避免管道编码问题。约定: 输入长度必须为偶数;
@@ -373,10 +470,17 @@ inline int engine_main(int argc,char**argv){
     //   * mode 2/3 用 chunk_seed 重建的局部 prng 选择 prefix/suffix —— 注意这里同时用了
     //     两次/三次 prng() 抽值, 抽取次数与顺序属于「随机结果的语义」, 不能重排或增减。
     auto prod=[&]{
+        // 用 q_add_or_stop 而不是 q_add: 队列满时会阻塞在条件变量上, 只有可中断的等待
+        // 才能让"父进程消失后收尾"真正生效 (见 q_add_or_stop 的说明)。
+        // 返回 false 表示应当停止投递 —— 直接收尾, 消费者会取完队列里剩下的任务后退出。
+        auto put=[&](const TaskData& t){return q_add_or_stop(q,t);};
+        bool stopped=false;
+        auto stop=[&]{stopped=true;};
         if(has_prefix_ranges){
-            for(int j=0;j<np;j++){
+            for(int j=0;j<np&&!stopped;j++){
                 uint64_t pl=prefix_L[j], pr=prefix_R[j];
                 for(uint64_t i=pl;i<pr;i+=CHUNK_SIZE){
+                    if(stopped)break;
                     uint64_t tr=i+CHUNK_SIZE;if(tr>pr)tr=pr;
                     TaskData t;t.L=i;t.R=tr;t.type=mode;
                     t.prefix_id=j+1;
@@ -384,21 +488,25 @@ inline int engine_main(int argc,char**argv){
                     if(mode==1) t.suffix_id=(j%ns)+1;
                     else if(mode==4) t.suffix_id=t.prefix_id;
                     else { std::mt19937_64 prng2(t.chunk_seed); t.suffix_id=prng2()%ns+1; }
-                    q_add(q,t);
+                    if(!put(t)){stop();break;}
                 }
             }
         } else {
-            if(mode==1)for(int j=0;j<np;j++)for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
-                uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
-                TaskData t;t.L=i;t.R=tr;t.type=1;t.prefix_id=j+1;t.suffix_id=(j%ns)+1;
-                t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);q_add(q,t);}
+            if(mode==1)for(int j=0;j<np&&!stopped;j++)
+                for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
+                    if(stopped)break;
+                    uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
+                    TaskData t;t.L=i;t.R=tr;t.type=1;t.prefix_id=j+1;t.suffix_id=(j%ns)+1;
+                    t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
+                    if(!put(t)){stop();break;}}
             else for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
+                if(stopped)break;
                 uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
                 TaskData t;t.L=i;t.R=tr;t.type=mode;
                 t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
                 std::mt19937_64 prng(t.chunk_seed);
                 t.prefix_id=prng()%np+1;t.suffix_id=mode==4?t.prefix_id:prng()%ns+1;
-                q_add(q,t);}
+                if(!put(t)){stop();break;}}
         }
         q_close(q);
     };
@@ -670,6 +778,8 @@ inline int engine_main(int argc,char**argv){
         };
 
         while(true){
+            // 父进程已消失: 不再取新任务, 让本线程干净退出 (手上这个 chunk 已算完)。
+            if(pbb_stop_requested()) break;
             // 动态线程数: 如果当前线程 id >= target_threads, 睡眠等待
             // 注意: 这里 continue 会跳过 q_get, 所以被"停用"的线程不会占用队列里的 chunk;
             //   醒来后若 target_threads 已恢复, 它会正常继续取任务。
@@ -805,6 +915,9 @@ inline int engine_main(int argc,char**argv){
     // 且所有 consumer 取空退出。任务分配是「工作窃取式的动态领取」(谁空谁取),
     // 因此不同线程的 chunk 数量不均衡是正常的, 不影响结果 (每个 chunk 自带种子)。
     DBG("creating 1 producer + %d consumers...",n_threads);
+    // 启动父进程监视: 父进程(监控器/CLI)一旦消失就停止投递并收尾退出,
+    // 避免"用户以为停了、引擎还在烧 CPU"。见文件上方的 pbb_start_parent_watchdog 说明。
+    pbb_start_parent_watchdog();
     std::thread pt(prod);std::vector<std::thread>cts;
     for(int i=0;i<n_threads;i++)cts.emplace_back(cons,i);
     DBG("all threads running");
