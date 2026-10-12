@@ -429,21 +429,22 @@ class ConfigSelector(tk.Toplevel):
     """
 
     COLUMNS = (
-        ("name", "文件名", 240),
-        ("prefixes", "前缀数量", 90),
-        ("variable_length", "变量长度", 90),
-        ("single_char_length", "单字符字节数", 110),
-        ("charset_size", "字符集大小", 100),
-        ("tested", "已测数量(T)", 110),
+        ("name", "文件名", 320),
+        ("prefixes", "前缀数量", 100),
+        ("variable_length", "变量长度", 100),
+        ("single_char_length", "单字符字节数", 130),
+        ("charset_size", "字符集大小", 110),
+        ("tested", "已测数量", 110),
     )
 
     @staticmethod
     def _format_tested(value: float) -> str:
-        """把「已测数量（单位 T = 10^12）」格式化成 3 位有效数字。
+        """把「已测数量」格式化成 ``1.23T`` 这样带单位的值（3 位有效数字）。
 
-        ``%.3g`` 即"至多 3 位有效数字"（有效数字位数由数值本身决定，不补尾零）：
-        1.0 -> "1"、2.5 -> "2.5"、1.234 -> "1.23"、12.34 -> "12.3"、
-        123.4 -> "123"、1234 -> "1.23e+03"。
+        单位 T = 10^12 **写在单元格里**而不是列标题里 —— 一眼就能连单位读出来，
+        不必来回对照表头。``%.3g`` 即"至多 3 位有效数字"（不补尾零）：
+        1.0 -> "1T"、2.5 -> "2.5T"、1.234 -> "1.23T"、12.34 -> "12.3T"、
+        123.4 -> "123T"、1234 -> "1.23e+03T"。
         注意别指望 ``%.3g`` 输出 "1.00" —— 1.0 只有 1 位有效数字。
         """
         try:
@@ -452,15 +453,17 @@ class ConfigSelector(tk.Toplevel):
             return "-"
         if number == 0:
             return "0"
-        return f"{number:.3g}"
+        return f"{number:.3g}T"
 
     def __init__(self, master: "Monitor"):
         super().__init__(master)
         self.monitor = master
         self.title("选择配置")
         self.configure(bg=master.colors["bg"])
-        self.geometry(scaled_geometry(660, 460))
-        self.minsize(*_scaled_min_size(520, 320))
+        # 列宽合计已接近 900 逻辑像素（字体放大后还要更宽），窗口必须相应放大，
+        # 否则右侧的「已测数量」列会被挤掉。高一点是为了多看几行配置。
+        self.geometry(scaled_geometry(1000, 620))
+        self.minsize(*_scaled_min_size(760, 420))
         self.transient(master)
         # 抓取输入让选择器成为模态：否则主窗口仍可点击，用户能再按一次「选择」
         # 叠出第二个选择器。注意**不要**在这里 lift/focus_force ——

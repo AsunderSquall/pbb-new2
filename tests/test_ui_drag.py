@@ -331,5 +331,24 @@ class AdvanceStartTests(unittest.TestCase):
         self.assertEqual(got, 1000)
 
 
+class TestedCountFormatTests(unittest.TestCase):
+    # 「已测数量」的单位写在**单元格里**（1.23T），不是列标题里 ——
+    # 这样一眼就能连单位读出来，不必来回对照表头。
+    def test_unit_is_in_the_cell_not_the_header(self):
+        self.assertEqual(ui.ConfigSelector._format_tested(1.234), "1.23T")
+        self.assertEqual(ui.ConfigSelector._format_tested(0.25), "0.25T")
+        self.assertEqual(ui.ConfigSelector._format_tested(123.4), "123T")
+        # 0 不画蛇添足加单位
+        self.assertEqual(ui.ConfigSelector._format_tested(0), "0")
+        # 列标题不应再带 (T)
+        header = dict((key, title) for key, title, _w in ui.ConfigSelector.COLUMNS)["tested"]
+        self.assertEqual(header, "已测数量")
+        self.assertNotIn("T", header)
+
+    # 非法值不能抛异常（表格要把读不出的配置也列出来）
+    def test_bad_value_is_safe(self):
+        self.assertEqual(ui.ConfigSelector._format_tested("not a number"), "-")
+
+
 if __name__ == "__main__":
     unittest.main()
