@@ -444,7 +444,19 @@ class ConfigSelector(tk.Toplevel):
         self.geometry(scaled_geometry(660, 460))
         self.minsize(*_scaled_min_size(520, 320))
         self.transient(master)
-        self.after_idle(lambda: apply_windows_window_icon(self))
+        # 必须抓取输入（模态）：否则主窗口仍可点击 —— 用户能再次按「选择」又弹出一个
+        # 选择器，或者在选择过程中改动主界面的配置，两边状态互相打架。
+        # grab_set 要在窗口已建立之后调用，所以放在 after_idle 里，与图标设置一起做。
+        def _make_modal():
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+            self.lift()
+            self.focus_force()
+            apply_windows_window_icon(self)
+        self.after_idle(_make_modal)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         body = ttk.Frame(self, padding=(18, 16))
         body.pack(fill="both", expand=True)
@@ -790,8 +802,8 @@ class Monitor(tk.Tk):
         # 输入框里只放**文件名**（不含目录），目录固定为 config/（见 build_settings.config_root）。
         # 点右侧「选择」会打开配置选择器（表格列出 config/ 下的全部配置）。
         ttk.Entry(controls, textvariable=self.config_name_var).grid(row=1, column=0, sticky="ew", pady=(4, 6))
-        ttk.Button(controls, text="选择", command=self._open_config_selector).grid(
-            row=1, column=1, padx=(6, 0))
+        self.config_select_button = ttk.Button(controls, text="选择", command=self._open_config_selector)
+        self.config_select_button.grid(row=1, column=1, padx=(6, 0))
         ttk.Label(controls, text="启动线程").grid(row=2, column=0, sticky="w", pady=(8, 2))
         self.start_threads_spinbox = ttk.Spinbox(
             controls, from_=1, to=256, textvariable=self.threads_var, width=8,
@@ -2226,9 +2238,24 @@ class Monitor(tk.Tk):
         self._open_editor()
 
     def _open_config_selector(self):
-        """打开「配置选择」对话框。"""
-        dialog = ConfigSelector(self)
-        self.wait_window(dialog)
+        """打开「配置选择」对话框（模态，同一时刻只允许一个）。"""
+        # 防御性护栏：即便 grab 失效（某些窗口管理器/SHELL 组合下会发生），
+        # 也不允许再开第二个选择器。
+        existing = getattr(self, "_config_selector", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+        # 再保险一层：禁用主窗口的「选择」按钮。grab_set 已经拦截鼠标，
+        # 但键盘（Tab 到按钮后按空格）在某些情况下仍能触发，禁用可彻底堵住。
+        self.config_select_button.configure(state="disabled")
+        try:
+            dialog = ConfigSelector(self)
+            self._config_selector = dialog
+            self.wait_window(dialog)
+        finally:
+            self._config_selector = None
+            self.config_select_button.configure(state="normal")
 
     def _close_editor(self):
         if self.editor and self.editor.winfo_exists():

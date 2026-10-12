@@ -211,5 +211,41 @@ class BlankConfigTests(unittest.TestCase):
         self.assertEqual(back["enumeration"]["mode"], cfg["enumeration"]["mode"])
 
 
+class ConfigSelectorReuseTests(unittest.TestCase):
+    # 选择器已打开时再次触发「选择」，必须复用原窗口而不是再弹一个。
+    # 旧实现没有 grab_set（非模态），主窗口仍可点击，于是能叠出多个选择器。
+    def test_existing_selector_is_reused_not_recreated(self):
+        existing = SimpleNamespace(winfo_exists=lambda: True, lift=Mock(), focus_force=Mock())
+        owner = SimpleNamespace(_config_selector=existing)
+        created = []
+        with patch.object(ui, "ConfigSelector", side_effect=lambda master: created.append(master)):
+            Monitor._open_config_selector(owner)
+        self.assertEqual(created, [], "已有选择器时不应新建窗口")
+        existing.lift.assert_called_once()
+        existing.focus_force.assert_called_once()
+
+    # 打开期间要禁用主窗口的「选择」按钮（键盘也能触发，单靠 grab 不够），
+    # 关闭后必须恢复，否则用户再也点不开选择器。
+    def test_select_button_disabled_while_open_and_restored(self):
+        button = Mock()
+        state = {"selector": None}
+
+        class FakeSelector:
+            def __init__(self, master):
+                pass
+
+        owner = SimpleNamespace(
+            _config_selector=None, config_select_button=button,
+            wait_window=Mock(),
+        )
+        with patch.object(ui, "ConfigSelector", FakeSelector):
+            Monitor._open_config_selector(owner)
+        # 打开时禁用、结束后恢复（state 是关键字参数）
+        states = [call.kwargs["state"] for call in button.configure.call_args_list
+                  if "state" in call.kwargs]
+        self.assertEqual(states, ["disabled", "normal"])
+        self.assertIsNone(owner._config_selector, "结束后应清空引用")
+
+
 if __name__ == "__main__":
     unittest.main()
