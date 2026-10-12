@@ -396,6 +396,27 @@ def apply_windows_window_icon(window):
     window._native_icon_handles = (small, large, target)
 
 
+class SimpleTextValue:
+    """把 ``tk.Text`` 包成与 ``tk.StringVar`` 同形的取值对象（只有 ``get``/``set``）。
+
+    为什么需要：编辑器里的字段统一按 ``editor_vars[key].get()`` 取值，
+    这样 ``_editor_config()`` 不必区分"这个字段是 Entry 还是多行 Text"。
+    ``tk.Text.get`` 必须带起止参数，直接塞进 editor_vars 就会在调用处炸掉，
+    所以这里适配一层。
+    """
+
+    def __init__(self, widget):
+        self.widget = widget
+
+    def get(self) -> str:
+        return self.widget.get("1.0", "end-1c")
+
+    def set(self, value) -> None:
+        self.widget.delete("1.0", "end")
+        if value:
+            self.widget.insert("1.0", str(value))
+
+
 class ConfigSelector(tk.Toplevel):
     """配置选择窗口：列出 config/ 下的配置文件，供选择、编辑、删除或新建。
 
@@ -1593,7 +1614,7 @@ class Monitor(tk.Tk):
             cfg = copy.deepcopy(pending)
         else:
             try:
-                cfg = load_config(self.config_var.get())
+                cfg = load_config(self._config_path())
                 _validate_config(cfg)
             except Exception as exc:
                 messagebox.showerror("无法导入配置", str(exc), parent=self)
@@ -1676,6 +1697,28 @@ class Monitor(tk.Tk):
             box.grid(row=row, column=column * 2 + 1, sticky="ew", pady=6)
             return box
 
+        def _multiline_field(parent, row, label, key, value, column=0, height_lines=6):
+            """多行自动换行输入框（用于可能很长的文本字段，如自定义字符表）。
+
+            与 field() 的区别：值是 ``tk.Text`` 的全文而不是 StringVar ——
+            这样长内容会自动折行铺满宽度，而不是像单行 Entry 那样挤成一长条。
+            ``_editor_config()`` 统一用 ``.get()`` 取值，Text 的 ``get`` 需要参数，
+            所以这里包一层无参 get 存进 editor_vars，调用方不必区分控件类型。
+            """
+            ttk.Label(parent, text=label).grid(
+                row=row, column=column * 2, sticky="nw", padx=(0, 8), pady=6)
+            text = tk.Text(parent, height=height_lines, wrap="char", undo=True,
+                           font=(UI_FONT, 11), bg=self.colors["field"], fg=self.colors["text"],
+                           insertbackground=self.colors["text"], relief="solid",
+                           borderwidth=1, padx=6, pady=4)
+            text.grid(row=row, column=column * 2 + 1, sticky="ew", pady=6)
+            if value:
+                text.insert("1.0", str(value))
+            # 暴露成"无参 .get()"接口，与 StringVar 用法一致：
+            # _editor_config() 里统一走 .get()，不必区分控件类型。
+            self.editor_vars[key] = SimpleTextValue(text)
+            return text
+
         cs = cfg["character_set"]
         rng = cfg["enumeration"].get("ranges", [{}])[0]
         basic_fields = (
@@ -1701,7 +1744,12 @@ class Monitor(tk.Tk):
         custom_text = (json.dumps(self.charset_custom_original,ensure_ascii=False)
                        if isinstance(self.charset_custom_original,list) else str(self.charset_custom_original))
         self.charset_custom_initial = custom_text
-        field(self.charset_custom_frame,0,"自定义字符 / JSON 字节列表","character_set.custom_values",custom_text,width=40)
+        # 自定义字符可能很长，用多行自动换行的文本框而不是单行输入框：
+        # 单行会把内容挤成一长条，既看不全也难编辑。
+        self.charset_custom_text = _multiline_field(
+            self.charset_custom_frame, 0,
+            "自定义字符 / JSON 字节列表", "character_set.custom_values",
+            custom_text, height_lines=6)
         self.charset_custom_frame.columnconfigure(1,weight=1)
         self.charset_unicode_frame = ttk.Frame(basic)
         self.charset_unicode_frame.grid(row=8,column=0,columnspan=2,sticky="ew",pady=6)
