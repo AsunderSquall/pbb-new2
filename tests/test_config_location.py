@@ -90,9 +90,11 @@ class ConfigLocationTests(unittest.TestCase):
             state={'path':str(current)}
             variable=Mock();variable.get.side_effect=lambda:state['path']
             variable.set.side_effect=lambda value:state.update(path=value)
+            name_var=Mock();name_var.get.return_value='custom.json'
             owner=SimpleNamespace(_editor_config=Mock(return_value=cfg),editor=None,
                 _confirm_affix_mismatch=Mock(return_value=True),config_var=variable,
-                _sync_config_controls=Mock(),editor_cfg=None)
+                editor_name_var=name_var,_set_config_path=Mock(),
+                _sync_config_controls=Mock(),editor_cfg=None,status_var=Mock())
             # 必须用 patch.object(ui.messagebox, ...) 而不是 patch('pbb.ui.messagebox...')：
             # 字符串形式会经 pkgutil.resolve_name 重新导入 pbb.ui，而该模块底部有
             # `if __name__ == "__main__": main()`，被当作新模块导入不会触发它，
@@ -100,13 +102,28 @@ class ConfigLocationTests(unittest.TestCase):
             with patch.object(ui,'CONFIG_DIR',str(root)),patch.object(ui.messagebox,'showerror') as error:
                 ui.Monitor._save_editor(owner)
                 self.assertEqual(json.loads(current.read_text(encoding='utf8')),cfg)
-                self.assertFalse((root/'config.yaml').exists())
-                before=current.read_bytes()
-                ui.Monitor._save_editor(owner,to_default=True)
-                self.assertEqual(ui.load_config(str(root/'config.yaml')),cfg)
-                self.assertEqual(current.read_bytes(),before)
-                self.assertEqual(state['path'],str(root/'config.yaml'))
+                # 保存目标恒为 CONFIG_DIR 下的文件：即便 config_var 里是一条绝对路径，
+                # 也只取文件名部分，不会写到别处去。
+                self.assertTrue(current.exists())
                 error.assert_not_called()
+
+    # 编辑器只有一个「保存」按钮：目标由文件名决定，缺扩展名补 .yaml，
+    # 且目录固定为 CONFIG_DIR（用户粘进整条路径也不会写歪）。
+    def test_save_editor_targets_config_dir_by_name(self):
+        cfg=ui.load_config('config_football.yaml')
+        with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory:
+            root=Path(directory)
+            name_var=Mock();name_var.get.return_value='我的配置'
+            owner=SimpleNamespace(_editor_config=Mock(return_value=cfg),editor=None,
+                _confirm_affix_mismatch=Mock(return_value=True),config_var=Mock(),
+                editor_name_var=name_var,_set_config_path=Mock(),
+                _sync_config_controls=Mock(),editor_cfg=None,status_var=Mock())
+            with patch.object(ui,'CONFIG_DIR',str(root)),patch.object(ui.messagebox,'showerror') as error:
+                ui.Monitor._save_editor(owner)
+                error.assert_not_called()
+            saved=root/'我的配置.yaml'
+            self.assertTrue(saved.is_file(),f"应保存为 {saved}")
+            self.assertEqual(ui.load_config(str(saved)),cfg)
 
     # 四种后缀（yaml/yml/json/toml）存了再读必须与内存中的配置等价：含中文、引号、
     # 反斜杠和换行的字段不能损坏。防的是编码/转义处理让配置悄悄变形。
@@ -130,7 +147,7 @@ class ConfigLocationTests(unittest.TestCase):
     # 回归：配置校验失败时，编辑器必须"弹窗并留在原地"，不能把监控器进程干掉。
     #
     # 原来的 _die() 直接 sys.exit(1)，抛出的 SystemExit 继承自 BaseException，
-    # 而 _save_editor / _open_editor / _start / _choose_config 用的都是 except Exception，
+    # 而 _save_editor / _open_editor / _start / 配置选择器 用的都是 except Exception，
     # 于是异常一路逃到 Tk 回调之外、进程退出 —— 用户看到的就是"保存时闪退"，
     # 既没有提示、也不知道哪里填错了。
     # 现在 _die() 抛 ConfigError（继承 Exception），各调用处既能捕获也能显示原因。

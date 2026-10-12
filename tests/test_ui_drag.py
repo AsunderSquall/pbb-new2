@@ -143,6 +143,7 @@ class CloseTests(unittest.TestCase):
         owner = SimpleNamespace(
             _closing=False, _after_ids=set(),
             _cancel_scheduled_after=Mock(), _stop=Mock(),
+            _advance_config_start=Mock(),
             proc=None, quit=Mock(), destroy=Mock(),
         )
         Monitor._close(owner)
@@ -158,6 +159,7 @@ class CloseTests(unittest.TestCase):
         owner = SimpleNamespace(
             _closing=False, _after_ids=set(),
             _cancel_scheduled_after=Mock(), _stop=Mock(),
+            _advance_config_start=Mock(),
             proc=proc, quit=Mock(), destroy=Mock(),
         )
         Monitor._close(owner)

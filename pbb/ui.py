@@ -352,6 +352,244 @@ def apply_windows_window_icon(window):
     window._native_icon_handles = (small, large, target)
 
 
+class ConfigSelector(tk.Toplevel):
+    """配置选择窗口：列出 config/ 下的配置文件，供选择、编辑、删除或新建。
+
+    为什么做成窗口而不是文件对话框：用户日常在几个固定配置之间切换（足球/篮球/自用…），
+    每次走系统文件对话框既慢又容易挑错目录。这里把 config/ 下的配置连同关键参数
+    （前缀数、变量长度、字符宽度、字符集大小）一起摊开，一眼就能认出要哪个。
+
+    表格用 ttk.Treeview：它自带行选择与滚动，比手工拼一堆 Label+Button 更省事，
+    也不会随配置数量增长而变慢。操作按钮放在底部，作用于当前选中行。
+    """
+
+    COLUMNS = (
+        ("name", "文件名", 240),
+        ("prefixes", "前缀数量", 90),
+        ("variable_length", "变量长度", 90),
+        ("single_char_length", "单字符字节数", 110),
+        ("charset_size", "字符集大小", 100),
+    )
+
+    def __init__(self, master: "Monitor"):
+        super().__init__(master)
+        self.monitor = master
+        self.title("选择配置")
+        self.configure(bg=master.colors["bg"])
+        self.geometry(scaled_geometry(660, 460))
+        self.minsize(*_scaled_min_size(520, 320))
+        self.transient(master)
+        self.after_idle(lambda: apply_windows_window_icon(self))
+
+        body = ttk.Frame(self, padding=(18, 16))
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text="config/ 下的配置文件", font=(UI_FONT, 13, "bold")).pack(anchor="w", pady=(0, 8))
+
+        table = ttk.Frame(body)
+        table.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            table, columns=[c[0] for c in self.COLUMNS], show="headings", selectmode="browse")
+        for key, title, width in self.COLUMNS:
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=width, anchor="w", stretch=(key == "name"))
+        scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda _e: self._select())
+
+        # 底部操作按钮：作用于当前选中行
+        actions = ttk.Frame(body)
+        actions.pack(fill="x", pady=(12, 0))
+        ttk.Button(actions, text="选择", command=self._select).pack(side="left")
+        ttk.Button(actions, text="编辑", command=self._edit).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="删除", command=self._delete).pack(side="left", padx=(6, 0))
+        # 用户明确要求这两个也在本窗口内
+        ttk.Button(actions, text="编辑新配置", command=self._new_config).pack(side="right")
+        ttk.Button(actions, text="从文件导入", command=self._import_from_file).pack(side="right", padx=(0, 6))
+
+        self.refresh()
+
+    # ---- 数据 ----
+
+    def _config_files(self) -> list[str]:
+        """config/ 下所有可读配置的完整路径（按文件名排序）。"""
+        names = []
+        for name in os.listdir(CONFIG_DIR):
+            path = os.path.join(CONFIG_DIR, name)
+            if not os.path.isfile(path):
+                continue
+            if os.path.splitext(name)[1].lower() in (".yaml", ".yml", ".json", ".toml"):
+                names.append(path)
+        return sorted(names, key=lambda p: os.path.basename(p).lower())
+
+    def _current_path(self) -> str | None:
+        """当前在表格里选中的配置文件路径（未选中返回 None）。"""
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        name = self.tree.item(selection[0], "values")[0]
+        return os.path.join(CONFIG_DIR, name)
+
+    def refresh(self):
+        """重新扫描 config/ 并重建表格，尽量保持原选中项。"""
+        keep = None
+        if self.tree.selection():
+            keep = self.tree.item(self.tree.selection()[0], "values")[0]
+        self.tree.delete(*self.tree.get_children())
+        for path in self._config_files():
+            name = os.path.basename(path)
+            try:
+                summary = self.monitor._config_summary(load_config(path))
+                values = (name, summary["prefixes"], summary["variable_length"],
+                          summary["single_char_length"], summary["charset_size"])
+            except Exception:
+                # 读不出来的配置也要列出来（否则用户不知道它坏了），只把参数留空
+                values = (name, "-", "-", "-", "-")
+            self.tree.insert("", "end", values=values)
+        if keep:
+            for item in self.tree.get_children():
+                if self.tree.item(item, "values")[0] == keep:
+                    self.tree.selection_set(item)
+                    break
+
+    def _require_selection(self) -> str | None:
+        path = self._current_path()
+        if path is None:
+            messagebox.showinfo("未选择配置", "请先在表格里选择一个配置文件。", parent=self)
+        return path
+
+    # ---- 操作 ----
+
+    def _select(self):
+        """选中当前高亮的配置作为主窗口当前配置，然后关闭本窗口。"""
+        path = self._require_selection()
+        if path is None:
+            return
+        try:
+            cfg = load_config(path)
+            _validate_config(cfg)
+        except Exception as exc:
+            messagebox.showerror("无法使用该配置", str(exc), parent=self)
+            return
+        self.monitor._set_config_path(path)
+        self.monitor._sync_config_controls(cfg)
+        self.monitor.status_var.set(f"已选择 {os.path.basename(path)}")
+        self.destroy()
+
+    def _edit(self):
+        """在当前配置上打开编辑器；关闭编辑器后刷新表格（参数可能已变）。"""
+        path = self._require_selection()
+        if path is None:
+            return
+        self.monitor._open_editor_for(path)
+        if self.monitor.editor is not None:
+            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+
+    def _on_editor_closed(self, _event=None):
+        self.after(50, self.refresh)
+
+    def _delete(self):
+        """删除当前配置（需确认）。"""
+        path = self._require_selection()
+        if path is None:
+            return
+        name = os.path.basename(path)
+        if not messagebox.askyesno("确认删除", f"确定删除配置「{name}」吗？\n此操作不可撤销。", parent=self):
+            return
+        try:
+            os.remove(path)
+        except OSError as exc:
+            messagebox.showerror("无法删除", str(exc), parent=self)
+            return
+        # 删掉的正好是主窗口当前配置时，回退到一个仍存在的配置，避免主窗口指向不存在的文件
+        if os.path.abspath(self.monitor._config_path()) == os.path.abspath(path):
+            remaining = self._config_files()
+            if remaining:
+                self.monitor._set_config_path(remaining[0])
+        self.monitor.status_var.set(f"已删除 {name}")
+        self.refresh()
+
+    def _import_from_file(self):
+        """从磁盘任意位置导入一个配置文件到 config/。
+
+        导入后把编辑器打开在它上面，用户可以立刻改参数；保存即写入 config/。
+        目标文件名默认沿用源文件名，重名时自动加序号，避免静默覆盖已有配置。
+        """
+        source = filedialog.askopenfilename(
+            parent=self, title="选择要导入的配置文件",
+            filetypes=[("配置文件", "*.yaml *.yml *.json *.toml"), ("全部文件", "*.*")])
+        if not source:
+            return
+        name = os.path.basename(source)
+        if not os.path.splitext(name)[1]:
+            name += ".yaml"
+        try:
+            cfg = load_config(source)          # 先校验能读，再决定落盘位置
+            _validate_config(cfg)
+        except Exception as exc:
+            messagebox.showerror("无法导入配置", str(exc), parent=self)
+            return
+        target = os.path.join(CONFIG_DIR, name)
+        if os.path.exists(target) and os.path.abspath(target) != os.path.abspath(source):
+            stem, ext = os.path.splitext(name)
+            index = 2
+            while os.path.exists(os.path.join(CONFIG_DIR, f"{stem}_{index}{ext}")):
+                index += 1
+            target = os.path.join(CONFIG_DIR, f"{stem}_{index}{ext}")
+        try:
+            save_config(target, cfg)           # 统一落成 config/ 内的文件（格式随扩展名）
+        except Exception as exc:
+            messagebox.showerror("无法导入配置", str(exc), parent=self)
+            return
+        self.refresh()
+        self.monitor.status_var.set(f"已导入 {os.path.basename(target)}")
+        self.monitor._open_editor_for(target)
+        if self.monitor.editor is not None:
+            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+
+    def _new_config(self):
+        """以当前配置（没有则用仓库里的示例配置）为模板新建一个配置并打开编辑器。
+
+        新文件名默认 ``新配置.yaml``，重名自动加序号 —— 让用户主要操心参数，
+        而不是先想一个不重名的文件名。
+        """
+        templates = []
+        current = self.monitor._config_path()
+        if current and os.path.isfile(current):
+            templates.append(current)
+        templates.extend(p for p in self._config_files()
+                         if os.path.abspath(p) not in {os.path.abspath(t) for t in templates})
+        cfg = None
+        for candidate in templates:
+            try:
+                cfg = load_config(candidate)
+                break
+            except Exception:
+                continue
+        if cfg is None:
+            messagebox.showerror("无法新建配置", "config/ 下没有可用作模板的配置文件。", parent=self)
+            return
+
+        stem = "新配置"
+        target = os.path.join(CONFIG_DIR, f"{stem}.yaml")
+        index = 2
+        while os.path.exists(target):
+            target = os.path.join(CONFIG_DIR, f"{stem}_{index}.yaml")
+            index += 1
+        try:
+            save_config(target, cfg)
+        except Exception as exc:
+            messagebox.showerror("无法新建配置", str(exc), parent=self)
+            return
+        self.refresh()
+        self.monitor.status_var.set(f"已新建 {os.path.basename(target)}")
+        self.monitor._open_editor_for(target)
+        if self.monitor.editor is not None:
+            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+
+
 class Monitor(tk.Tk):
     """监控器主窗口：负责界面、任务启停、进度解析与排行榜展示。
 
@@ -418,7 +656,10 @@ class Monitor(tk.Tk):
         default_config = os.path.join(CONFIG_DIR, "config.yaml")
         if not os.path.isfile(default_config):
             default_config = os.path.join(CONFIG_DIR, "config_football.yaml")
+        # config_var 保存**完整路径**（内部使用）；config_name_var 是界面上那一格，
+        # 只显示文件名。两者通过 _config_path() 保持一致。
         self.config_var = tk.StringVar(value=default_config)
+        self.config_name_var = tk.StringVar(value=os.path.basename(default_config))
         self.threads_var = tk.StringVar(value=str(os.cpu_count() or 4))
         self.runtime_threads_var = tk.StringVar(value=self.threads_var.get())
         self.runtime_thread_limit = 0
@@ -435,6 +676,14 @@ class Monitor(tk.Tk):
         self.rebuild_requested = False
         self.resume_var = tk.BooleanVar(value=False)
         self.rebuild_var = tk.BooleanVar(value=False)
+        # 「自动更新 start」默认勾选：每次测号结束时把配置里的 start 推进本次已跑的候选数。
+        self.auto_start_var = tk.BooleanVar(value=True)
+        # 本次运行用于回写 start 的账：以哪个 start 起步、本会话处理了多少候选。
+        self._run_origin: dict | None = None
+        self._run_start: int = 0
+        self._run_processed: int = 0
+        self._run_config_path: str | None = None
+        self._run_start_updated = False
         # 关闭状态与 after 记账表必须在 _build_layout() 之前初始化：
         # 布局构建过程里就会调用 _schedule_after（例如排行榜的换行绑定）。
         self._closing = False
@@ -482,9 +731,12 @@ class Monitor(tk.Tk):
 
         controls = ttk.Frame(sidebar, padding=(22, 18, 22, 10))
         controls.pack(fill="x")
-        ttk.Label(controls, text="配置").grid(row=0, column=0, sticky="w")
-        ttk.Entry(controls, textvariable=self.config_var).grid(row=1, column=0, sticky="ew", pady=(4, 6))
-        ttk.Button(controls, text="导入", command=self._choose_config).grid(row=1, column=1, padx=(6, 0))
+        ttk.Label(controls, text="配置文件").grid(row=0, column=0, sticky="w")
+        # 输入框里只放**文件名**（不含目录），目录固定为 config/（见 build_settings.config_root）。
+        # 点右侧「选择」会打开配置选择器（表格列出 config/ 下的全部配置）。
+        ttk.Entry(controls, textvariable=self.config_name_var).grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        ttk.Button(controls, text="选择", command=self._open_config_selector).grid(
+            row=1, column=1, padx=(6, 0))
         ttk.Label(controls, text="启动线程").grid(row=2, column=0, sticky="w", pady=(8, 2))
         self.start_threads_spinbox = ttk.Spinbox(
             controls, from_=1, to=256, textvariable=self.threads_var, width=8,
@@ -514,10 +766,15 @@ class Monitor(tk.Tk):
         self._build_main_result_file(controls)
         launch_options = ttk.Frame(controls)
         launch_options.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self.resume_checkbutton = self._checkbutton(launch_options, "Resume 续测", self.resume_var)
+        self.resume_checkbutton = self._checkbutton(launch_options, "读入文件并续测", self.resume_var)
         self.resume_checkbutton.pack(side="left")
         self.rebuild_checkbutton = self._checkbutton(launch_options, "Rebuild 引擎", self.rebuild_var)
         self.rebuild_checkbutton.pack(side="left", padx=(12, 0))
+        # 与「读入文件并续测」同一行的第二个复选框：结束时把配置里的 start 往前推。
+        # 默认勾选 —— 这样下次不需要续测也能从上次的位置接着算。
+        self.auto_start_checkbutton = self._checkbutton(
+            launch_options, "自动更新 start", self.auto_start_var)
+        self.auto_start_checkbutton.pack(side="left", padx=(12, 0))
         self.start_button = ttk.Button(controls, text="开始", command=self._start)
         self.start_button.grid(row=12, column=0, sticky="ew", pady=(10, 0))
         self.stop_button = ttk.Button(controls, text="停止", command=self._stop, state="disabled")
@@ -534,7 +791,7 @@ class Monitor(tk.Tk):
         # 与容器实际宽度无关，看起来就是"换行位置莫名其妙"。现在交给 wraplength
         # 按容器宽度自然断行。
         ttk.Label(
-            right, text="重要启动选项：Resume 续测 / Rebuild 引擎", style="LaunchNotice.TLabel",
+            right, text="重要启动选项：读入文件并续测 / Rebuild 引擎 / 自动更新 start", style="LaunchNotice.TLabel",
         ).pack(anchor="w", pady=(0, 4))
         self._wrap_label(ttk.Label(
             right,
@@ -1320,16 +1577,13 @@ class Monitor(tk.Tk):
         ttk.Label(top, text="配置编辑", font=(UI_FONT, 18, "bold")).pack(side="left")
         actions = ttk.Frame(top)
         actions.pack(side="right")
-        ttk.Button(actions, text="导入", command=lambda: self._choose_config(edit=True)).pack(
-            side="left", padx=(0, 8)
-        )
-        ttk.Button(actions, text="保存到当前文件", command=self._save_editor).pack(side="left")
-        ttk.Button(actions, text="保存到 config.yaml", command=lambda: self._save_editor(to_default=True)).pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(actions, text="保存并启动", command=lambda: self._save_editor(start=True)).pack(
-            side="left", padx=(8, 0)
-        )
+        # 文件名输入框 + 单个「保存」。原先的「导入 / 保存到当前文件 / 保存到 config.yaml /
+        # 保存并启动」四个按钮已收敛：导入与编辑新配置都从配置选择器发起，
+        # 保存目标由这个输入框决定（也是"另存为"的方式）。
+        self.editor_name_var = tk.StringVar(value=os.path.basename(self.config_var.get()))
+        ttk.Label(actions, text="文件名").pack(side="left", padx=(0, 6))
+        ttk.Entry(actions, textvariable=self.editor_name_var, width=24).pack(side="left")
+        ttk.Button(actions, text="保存", command=self._save_editor).pack(side="left", padx=(8, 0))
         recommendation = ttk.Frame(editor, padding=(22, 0, 22, 10))
         recommendation.pack(fill="x")
         self._wrap_label(ttk.Label(
@@ -1725,14 +1979,17 @@ class Monitor(tk.Tk):
                     normalized.append(family)
         return ",".join(family for family in FAMILIES if family in normalized)
 
-    def _save_editor(self, start=False, to_default=False):
-        """保存编辑器内容。两个保存目标对应界面上两个按钮：
+    def _save_editor(self, start=False, name: str | None = None):
+        """保存编辑器内容到 **一个** 目标文件。
 
-        - 默认（to_default=False）：写回当前配置文件，保留其 YAML/JSON/TOML 格式；
-        - to_default=True：写 config.yaml 并把 UI 切换到它（README.md 有说明）。
+        目标名的确定顺序：
+          1. 显式传入的 ``name``（配置选择器/主窗口输入框给的）——缺扩展名时补 .yaml，
+             只取文件名部分，目录固定为 config/；
+          2. 否则用编辑器顶部输入框里的名字；
+          3. 再否则保留当前配置文件的文件名。
 
-        保存前统一走 _validate_config；--一一对应模式（mode 4）下前后缀数量不等时先
-        弹确认框（_confirm_affix_mismatch），因为缺口会被取模循环或多出的后缀静默吞掉。
+        保存前统一走 _validate_config；一一对应模式（mode 4）下前后缀数量不等时先弹确认框
+        （_confirm_affix_mismatch），因为缺口会被取模循环或多出的后缀静默吞掉。
         任何失败都只弹窗不改状态，保证编辑器里的未保存内容不丢。
         """
         try:
@@ -1740,18 +1997,24 @@ class Monitor(tk.Tk):
             _validate_config(cfg)
             if not self._confirm_affix_mismatch(cfg):
                 return
-            target = os.path.join(CONFIG_DIR, "config.yaml") if to_default else self.config_var.get().strip()
-            if not target:
-                raise ValueError("请先选择当前配置文件，或使用保存到 config.yaml。")
-            if not os.path.isabs(target):
-                target = os.path.join(CONFIG_DIR, target)
+            raw = (name if name is not None else self.editor_name_var.get()).strip()
+            if not raw:
+                raw = os.path.basename(self.config_var.get().strip())
+            raw = os.path.basename(raw.replace("\\", "/"))
+            if not raw:
+                raise ValueError("请先填写配置文件名。")
+            if not os.path.splitext(raw)[1]:
+                raw += ".yaml"
+            target = os.path.join(CONFIG_DIR, raw)
             save_config(target, cfg)
         except Exception as exc:
             messagebox.showerror("无法保存配置", str(exc), parent=self.editor)
             return
-        self.config_var.set(target)
+        self._set_config_path(target)
+        self.editor_name_var.set(os.path.basename(target))
         self.editor_cfg = cfg
         self._sync_config_controls(cfg)
+        self.status_var.set(f"已保存 {os.path.basename(target)}")
         if start:
             self._close_editor()
             self._start()
@@ -1769,6 +2032,108 @@ class Monitor(tk.Tk):
             f"前缀 {np} 条，后缀 {ns} 条。\n配对以 {np} 条前缀为准。\n{detail}\n\n仍要继续保存吗？",
             parent=self.editor,
         )
+
+    def _config_path(self) -> str:
+        """由界面上的文件名解析出完整路径（目录固定为 CONFIG_DIR）。
+
+        输入框允许用户直接手打文件名，所以这里做两件事：
+          - 只取文件名部分，避免用户粘进整条路径后拼出奇怪的结果；
+          - 补上默认扩展名 ``.yaml``（config/ 下的配置以 .yaml 为主）。
+        """
+        raw = self.config_name_var.get().strip()
+        name = os.path.basename(raw.replace("\\", "/")) if raw else ""
+        if not name:
+            return ""
+        if not os.path.splitext(name)[1]:
+            name += ".yaml"
+        return os.path.join(CONFIG_DIR, name)
+
+    def _set_config_path(self, path: str):
+        """同时更新内部路径与界面文件名。"""
+        self.config_var.set(path)
+        self.config_name_var.set(os.path.basename(path))
+
+    def _config_summary(self, cfg: dict) -> dict:
+        """取配置表格要显示的几个字段。
+
+        字段口径与引擎一致：
+          - 前缀数量：``prefixes`` 条数；
+          - 变量长度：``enumeration.variable_length``（枚举单元的位数）；
+          - 单字符字节数：``character_set.single_char_length``（每个枚举单元的字节宽度）；
+          - 字符集大小：枚举基数 = 字符集字节数 / 单字符字节数（与 engine.py 的算法同源）。
+        字符集大小用纯字节长度估算，不调用 pbb_core（表格只是给人看的概览）。
+        """
+        en = cfg.get("enumeration", {}) or {}
+        cs = cfg.get("character_set", {}) or {}
+        scl = int(cs.get("single_char_length", 0) or 0)
+        size = 0
+        if scl > 0:
+            try:
+                # 自定义字符：按 UTF-8 字节数计
+                custom = cs.get("custom_values")
+                if isinstance(custom, str) and custom:
+                    size += len(custom.encode("utf-8"))
+                elif isinstance(custom, list):
+                    size += len(bytes(int(v) & 0xFF for v in custom))
+            except Exception:
+                pass
+        return {
+            "prefixes": len(cfg.get("prefixes", []) or []),
+            "variable_length": en.get("variable_length", 0),
+            "single_char_length": scl,
+            "charset_size": (size // scl) if scl else 0,
+        }
+
+    def _advance_config_start(self):
+        """把本次已处理的候选数加到配置文件里每个前缀区间的 start 上。
+
+        语义（与「自动更新 start」复选框对应）：
+          配置里的 ``start`` 推进 ``本次会话处理量``，于是下次直接点「开始」就是从
+          上次停下的位置继续，不需要依赖续测。**关闭窗口时也会执行**（见 _close）。
+
+        实现要点：
+          * 基准是**本次运行起步时的 config 快照**（``_run_origin``），而不是磁盘当前内容 ——
+            否则续测场景下会把已经推进过的 start 再加一遍；
+          * 本次处理量取 ``self._run_processed``（进度行 ``count=X.XXXT`` 换算而来），
+            它正是「已下发并算完的候选数」，与 start 的计数口径一致；
+          * 通过 ``task_id`` 反推本次实际覆盖的区间会不准（随机模式重叠），所以只用计数；
+          * 仅在 ``enumeration.ranges`` 上推进：``prefix_ranges`` 是续测用的派生字段，
+            回写它会把"临时续测范围"固化成配置，反而破坏语义；
+          * 只写一次（``_run_start_updated``），避免 stop 与 close 重复累加。
+        """
+        if self._run_start_updated:
+            return
+        self._run_start_updated = True
+        if not self.auto_start_var.get():
+            return
+        origin = self._run_origin
+        path = self._run_config_path
+        processed = self._run_processed
+        if not origin or not path or processed <= 0:
+            return
+        try:
+            cfg = copy.deepcopy(origin)
+            ranges = cfg.get("enumeration", {}).get("ranges") or []
+            if not ranges:
+                return
+            for item in ranges:
+                old = int(item.get("start", 0) or 0)
+                item["start"] = old + processed
+            save_config(path, cfg)
+            self.status_var.set(f"已更新 {os.path.basename(path)} 的 start（+{processed}）")
+        except Exception as exc:
+            # 回写失败不能影响停止流程，只在状态栏提示
+            self.status_var.set(f"更新 start 失败：{exc}")
+
+    def _open_editor_for(self, path: str):
+        """打开编辑器并载入指定配置文件（供配置选择器调用）。"""
+        self._set_config_path(path)
+        self._open_editor()
+
+    def _open_config_selector(self):
+        """打开「配置选择」对话框。"""
+        dialog = ConfigSelector(self)
+        self.wait_window(dialog)
 
     def _close_editor(self):
         if self.editor and self.editor.winfo_exists():
@@ -1788,9 +2153,16 @@ class Monitor(tk.Tk):
         resume = self.resume_var.get()
         rebuild = self.rebuild_var.get()
         try:
-            config_path = self.config_var.get().strip()
+            config_path = self._config_path()
             cfg = load_config(config_path)
             _validate_config(cfg)
+            # 记下本次运行的基准：起步时的 config 快照 + start。
+            # 结束时按「基准 + 本次处理量」回写，见 _advance_config_start。
+            self._run_origin = copy.deepcopy(cfg)
+            self._run_config_path = config_path
+            self._run_start = int((cfg.get("enumeration", {}).get("ranges") or [{}])[0].get("start", 0) or 0)
+            self._run_processed = 0
+            self._run_start_updated = False
             # Resume 仅支持枚举模式 1：位置由结果文件最后一条命中推出，不是精确检查点。
             if resume:
                 from .main import _resolve_result_file, _try_resume
@@ -2049,6 +2421,12 @@ class Monitor(tk.Tk):
         match = COUNT_RE.search(line)
         if match:
             self.stat_vars["count"].set(f"{match.group(1)}T")
+            # 记下本次会话已处理的候选数（引擎按「已完成 task × CHUNK_SIZE」累计），
+            # 供结束时推进配置里的 start（见 _advance_config_start）。
+            try:
+                self._run_processed = int(round(float(match.group(1)) * 1e12))
+            except (TypeError, ValueError):
+                pass
         match = CURRENT_RE.search(line)
         if match:
             self.stat_vars["realtime"].set(f"{match.group(1)}T/d")
@@ -2091,6 +2469,9 @@ class Monitor(tk.Tk):
         self.stop_requested = True
         self.stop_button.configure(state="disabled")
         self.status_var.set("正在停止引擎..." if self.proc else "正在取消启动...")
+        # 先按当前进度推进配置里的 start：不能只等 _set_finished —— 强杀路径下工作线程
+        # 可能来不及收尾，而用户点「停止」的语义就是"到此为止，记下位置"。
+        self._advance_config_start()
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             self._schedule_after(1500, self._force_stop, self.proc)
@@ -2104,6 +2485,9 @@ class Monitor(tk.Tk):
         self.running = False
         self.stop_requested = False
         self.proc = None
+        # 正常跑完 / 停止流程收尾时也推进一次；_advance_config_start 自身去重，
+        # 所以和 _stop、_close 里的调用不会重复累加。
+        self._advance_config_start()
         self._clear_runtime_threads()
         self.runtime_thread_limit = 0
         self.runtime_active_threads = 0
@@ -2160,6 +2544,9 @@ class Monitor(tk.Tk):
         """
         self._closing = True
         self._cancel_scheduled_after()
+        # 关闭窗口也要把 start 推进（用户可能直接点 X 而不点「停止」）。
+        # 这里在 _stop() 之前调用，因为 _stop() 里也会调一次；靠 _run_start_updated 去重。
+        self._advance_config_start()
         self._stop()
         proc = self.proc
         if proc is not None and proc.poll() is None:
