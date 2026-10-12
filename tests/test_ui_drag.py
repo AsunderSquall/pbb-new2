@@ -331,6 +331,37 @@ class AdvanceStartTests(unittest.TestCase):
         self.assertEqual(got, 1000)
 
 
+class SearchConfigFilterTests(unittest.TestCase):
+    # config/ 下的 build_config.fresh.json 是**编译选项清单**，不是测号配置，
+    # 必须挡在选择框外（它同样以 .json 结尾，光看扩展名区分不了）。
+    # 判据用结构特征而非文件名，所以清单改名/新增清单也能挡住。
+    def test_build_manifest_is_not_a_search_config(self):
+        manifest = {
+            "version": 1, "tested": False, "status": "none",
+            "options": {"lto": True, "ksa": True},
+            "machine": None, "compiler": None,
+            "source_hashes": {}, "result": None,
+        }
+        self.assertFalse(ui.ConfigSelector.is_search_config(manifest))
+
+    def test_real_config_is_a_search_config(self):
+        for name in ("config.example.json", "config.example.toml",
+                     "config.example.yaml", "config_football.yaml"):
+            cfg = ui.load_config(name)
+            self.assertTrue(ui.ConfigSelector.is_search_config(cfg),
+                            f"{name} 应被识别为测号配置")
+
+    # 缺任一必备 section 的都不算；非 dict 也不能抛异常
+    def test_missing_sections_and_bad_input(self):
+        full = ui.load_config("config_football.yaml")
+        for key in ui.ConfigSelector._CONFIG_SECTIONS:
+            partial = {k: v for k, v in full.items() if k != key}
+            self.assertFalse(ui.ConfigSelector.is_search_config(partial),
+                             f"缺 {key} 时不应算测号配置")
+        for bad in (None, [], "text", 42):
+            self.assertFalse(ui.ConfigSelector.is_search_config(bad))
+
+
 class TestedCountFormatTests(unittest.TestCase):
     # 「已测数量」的单位写在**单元格里**（1.23T），不是列标题里 ——
     # 这样一眼就能连单位读出来，不必来回对照表头。

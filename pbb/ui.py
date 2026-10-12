@@ -512,15 +512,44 @@ class ConfigSelector(tk.Toplevel):
 
     # ---- 数据 ----
 
+    # 测号配置必备的顶层键（用于把 build 清单之类的"非测号配置"挡在选择范围外）
+    _CONFIG_SECTIONS = ("character_set", "prefixes", "suffixes", "enumeration", "collection")
+
+    @classmethod
+    def is_search_config(cls, cfg) -> bool:
+        """判断一份文件是不是「测号配置」。
+
+        为什么需要：config/ 下还放着 ``build_config.fresh.json`` —— 那是**编译选项清单**
+        （version/options/source_hashes/machine/compiler/result），根本不是测号配置，
+        却因为同样是 .json 而被列进选择框，白占一行还可能被误选。
+
+        判据用**结构特征而不是文件名**：测号配置必然有 character_set / prefixes /
+        suffixes / enumeration / collection 这几个 section，而编译清单一个都没有。
+        这样以后清单改名或新增清单也能挡住，不必维护文件名黑名单。
+        """
+        if not isinstance(cfg, dict):
+            return False
+        return all(key in cfg for key in cls._CONFIG_SECTIONS)
+
     def _config_files(self) -> list[str]:
-        """config/ 下所有可读配置的完整路径（按文件名排序）。"""
+        """config/ 下所有可读**测号配置**的完整路径（按文件名排序）。
+
+        解析失败或结构不像测号配置的一律跳过：前者无法使用，后者不是这个用途的文件。
+        不再把它们列进表格 —— 列出来既占位置，又会在「选择」时报错。
+        """
         names = []
         for name in os.listdir(CONFIG_DIR):
             path = os.path.join(CONFIG_DIR, name)
             if not os.path.isfile(path):
                 continue
-            if os.path.splitext(name)[1].lower() in (".yaml", ".yml", ".json", ".toml"):
-                names.append(path)
+            if os.path.splitext(name)[1].lower() not in (".yaml", ".yml", ".json", ".toml"):
+                continue
+            try:
+                if not self.is_search_config(load_config(path)):
+                    continue
+            except Exception:
+                continue
+            names.append(path)
         return sorted(names, key=lambda p: os.path.basename(p).lower())
 
     def _current_path(self) -> str | None:
