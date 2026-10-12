@@ -434,7 +434,25 @@ class ConfigSelector(tk.Toplevel):
         ("variable_length", "变量长度", 90),
         ("single_char_length", "单字符字节数", 110),
         ("charset_size", "字符集大小", 100),
+        ("tested", "已测数量(T)", 110),
     )
+
+    @staticmethod
+    def _format_tested(value: float) -> str:
+        """把「已测数量（单位 T = 10^12）」格式化成 3 位有效数字。
+
+        ``%.3g`` 即"至多 3 位有效数字"（有效数字位数由数值本身决定，不补尾零）：
+        1.0 -> "1"、2.5 -> "2.5"、1.234 -> "1.23"、12.34 -> "12.3"、
+        123.4 -> "123"、1234 -> "1.23e+03"。
+        注意别指望 ``%.3g`` 输出 "1.00" —— 1.0 只有 1 位有效数字。
+        """
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "-"
+        if number == 0:
+            return "0"
+        return f"{number:.3g}"
 
     def __init__(self, master: "Monitor"):
         super().__init__(master)
@@ -444,18 +462,12 @@ class ConfigSelector(tk.Toplevel):
         self.geometry(scaled_geometry(660, 460))
         self.minsize(*_scaled_min_size(520, 320))
         self.transient(master)
-        # 必须抓取输入（模态）：否则主窗口仍可点击 —— 用户能再次按「选择」又弹出一个
-        # 选择器，或者在选择过程中改动主界面的配置，两边状态互相打架。
-        # grab_set 要在窗口已建立之后调用，所以放在 after_idle 里，与图标设置一起做。
-        def _make_modal():
-            try:
-                self.grab_set()
-            except Exception:
-                pass
-            self.lift()
-            self.focus_force()
-            apply_windows_window_icon(self)
-        self.after_idle(_make_modal)
+        # 抓取输入让选择器成为模态：否则主窗口仍可点击，用户能再按一次「选择」
+        # 叠出第二个选择器。注意**不要**在这里 lift/focus_force ——
+        # 选择器里可以再打开配置编辑器，强行置顶会把编辑器压在下面、操作不了。
+        # 主窗口的「选择」按钮另外会被禁用（见 Monitor._open_config_selector），双保险。
+        self.after_idle(lambda: apply_windows_window_icon(self))
+        self.after_idle(self._grab_input)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         body = ttk.Frame(self, padding=(18, 16))
@@ -527,10 +539,11 @@ class ConfigSelector(tk.Toplevel):
             try:
                 summary = self.monitor._config_summary(load_config(path))
                 values = (name, summary["prefixes"], summary["variable_length"],
-                          summary["single_char_length"], summary["charset_size"])
+                          summary["single_char_length"], summary["charset_size"],
+                          self._format_tested(summary["tested"]))
             except Exception:
                 # 读不出来的配置也要列出来（否则用户不知道它坏了），只把参数留空
-                values = (name, "-", "-", "-", "-")
+                values = (name, "-", "-", "-", "-", "-")
             self.tree.insert("", "end", values=values)
         if keep:
             for item in self.tree.get_children():
@@ -545,6 +558,24 @@ class ConfigSelector(tk.Toplevel):
         return path
 
     # ---- 操作 ----
+
+    def _grab_input(self):
+        """抓取输入，使本窗口成为模态（不置顶、不抢焦点）。"""
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+
+    def _release_grab(self):
+        """临时释放抓取：本窗口内还要再开子窗口（配置编辑器）时用它让路。
+
+        抓取是"独占输入"，被抓住时子窗口虽然能显示，键盘输入却会落到选择器上 ——
+        表现就是"配置编辑框根本操作不了"。所以打开编辑器前先释放，关掉编辑器后再抓回来。
+        """
+        try:
+            self.grab_release()
+        except Exception:
+            pass
 
     def _select(self):
         """选中当前高亮的配置作为主窗口当前配置，然后关闭本窗口。"""
@@ -562,16 +593,27 @@ class ConfigSelector(tk.Toplevel):
         self.monitor.status_var.set(f"已选择 {os.path.basename(path)}")
         self.destroy()
 
+    def _open_editor_with_grab_handoff(self, path: str):
+        """打开配置编辑器，并临时让出手部抓取（否则编辑器无法操作）。
+
+        打开前释放 grab、编辑器关闭后重新抓取，使选择器在编辑器期间"退居二线"：
+        编辑器可以正常输入，编辑完选择器恢复模态。
+        """
+        self._release_grab()
+        self.monitor._open_editor_for(path)
+        if self.monitor.editor is not None:
+            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+
     def _edit(self):
         """在当前配置上打开编辑器；关闭编辑器后刷新表格（参数可能已变）。"""
         path = self._require_selection()
         if path is None:
             return
-        self.monitor._open_editor_for(path)
-        if self.monitor.editor is not None:
-            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+        self._open_editor_with_grab_handoff(path)
 
     def _on_editor_closed(self, _event=None):
+        # 编辑器关掉后把模态抓回来，并刷新表格（配置可能已被编辑）
+        self.after(50, self._grab_input)
         self.after(50, self.refresh)
 
     def _delete(self):
@@ -629,9 +671,7 @@ class ConfigSelector(tk.Toplevel):
             return
         self.refresh()
         self.monitor.status_var.set(f"已导入 {os.path.basename(target)}")
-        self.monitor._open_editor_for(target)
-        if self.monitor.editor is not None:
-            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+        self._open_editor_with_grab_handoff(target)
 
     def _new_config(self):
         """打开一个**空白**的配置编辑页；点「保存」后才写入 config/ 并出现在表格里。
@@ -649,10 +689,8 @@ class ConfigSelector(tk.Toplevel):
             target = os.path.join(CONFIG_DIR, f"{stem}_{index}.yaml")
             index += 1
         self.monitor._pending_editor_cfg = cfg
-        self.monitor._open_editor_for(target)
-        if self.monitor.editor is not None:
-            # 编辑器保留建议文件名；保存后才需要刷新表格（此时表格里才会新增一行）
-            self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
+        # 编辑器保留建议文件名；保存后 _on_editor_closed 会刷新表格（那时才新增一行）
+        self._open_editor_with_grab_handoff(target)
 
 
 class Monitor(tk.Tk):
@@ -743,11 +781,13 @@ class Monitor(tk.Tk):
         self.rebuild_var = tk.BooleanVar(value=False)
         # 「自动更新 start」默认勾选：每次测号结束时把配置里的 start 推进本次已跑的候选数。
         self.auto_start_var = tk.BooleanVar(value=True)
-        # 本次运行用于回写 start 的账：以哪个 start 起步、本会话处理了多少候选。
+        # 本次运行用于回写 start 的账
         self._run_origin: dict | None = None
+        # 本次**实际起步**位置：未续测=配置 start，续测=续测后的 start。
+        # 回写时以它为基准（见 _advance_config_start），否则续测过的会话会漏记一段。
+        self._run_effective_start: int = 0
         # 「编辑新配置」预置的空白配置：非 None 时编辑器用它而不是读文件
         self._pending_editor_cfg: dict | None = None
-        self._run_start: int = 0
         self._run_processed: int = 0
         self._run_config_path: str | None = None
         self._run_start_updated = False
@@ -2160,50 +2200,95 @@ class Monitor(tk.Tk):
         self.config_var.set(path)
         self.config_name_var.set(os.path.basename(path))
 
+    @staticmethod
+    def _charset_size(cs: dict) -> int:
+        """字符集大小 = **枚举基数**，按 ``types`` 逐个累加（与引擎口径一致）。
+
+        **为什么不能按 custom_values 的字节数算**：``types`` 里除「自定义字符」以外的
+        类型各自带自己的字符表 —— 1 字节下 type 1/2/3 分别是数字 / 小写英文 / 大写英文，
+        与 custom_values 毫无关系。曾经只用 custom_values 的字节长度估算，
+        于是 ``types=[1,2,3]``（数字+小写+大写 = 62）被算成了 custom_values 里
+        30 个汉字对应的字节数（92），完全算错了对象。
+
+        口径与 engine.py 的 _build_charset 一致：同一 scl 下各类型依次拼接、不去重。
+        类型码含义见 engine.py 的 docstring（1 字节: 1数字/2小写/3大写/4,5自定义）。
+        """
+        scl = int(cs.get("single_char_length", 0) or 0)
+        if scl < 1:
+            return 0
+        custom = cs.get("custom_values")
+        if isinstance(custom, str):
+            custom_bytes = custom.encode("utf-8")
+        elif isinstance(custom, list):
+            try:
+                custom_bytes = bytes(int(v) & 0xFF for v in custom)
+            except (TypeError, ValueError):
+                custom_bytes = b""
+        else:
+            custom_bytes = b""
+        buf = bytearray()
+        for t in cs.get("types", []) or []:
+            if scl == 1:
+                if t == 1:
+                    buf.extend(b"0123456789")
+                elif t == 2:
+                    buf.extend(b"abcdefghijklmnopqrstuvwxyz")
+                elif t == 3:
+                    buf.extend(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                elif t in (4, 5):
+                    buf.extend(custom_bytes)
+            elif scl in (2, 3):
+                if t == 7:
+                    buf.extend(custom_bytes)
+            elif scl == 4:
+                if t == 2:
+                    buf.extend(custom_bytes)
+            elif t == 1:
+                buf.extend(custom_bytes)
+        return len(buf) // scl
+
     def _config_summary(self, cfg: dict) -> dict:
-        """取配置表格要显示的几个字段。
+        """取配置表格要显示的各列。
 
         字段口径与引擎一致：
           - 前缀数量：``prefixes`` 条数；
           - 变量长度：``enumeration.variable_length``（枚举单元的位数）；
           - 单字符字节数：``character_set.single_char_length``（每个枚举单元的字节宽度）；
-          - 字符集大小：枚举基数 = 字符集字节数 / 单字符字节数（与 engine.py 的算法同源）。
-        字符集大小用纯字节长度估算，不调用 pbb_core（表格只是给人看的概览）。
+          - 字符集大小：枚举基数（见 _charset_size）；
+          - 已测数量：已扫描候选数 ÷ 10^12（单位 T），保留 3 位有效数字。
+            "已扫描"取 ``ranges[0].start`` —— 它正是「自动更新 start」不断推进的量，
+            启用该功能后这个数会随每次测号增长。
         """
         en = cfg.get("enumeration", {}) or {}
         cs = cfg.get("character_set", {}) or {}
         scl = int(cs.get("single_char_length", 0) or 0)
-        size = 0
-        if scl > 0:
-            try:
-                # 自定义字符：按 UTF-8 字节数计
-                custom = cs.get("custom_values")
-                if isinstance(custom, str) and custom:
-                    size += len(custom.encode("utf-8"))
-                elif isinstance(custom, list):
-                    size += len(bytes(int(v) & 0xFF for v in custom))
-            except Exception:
-                pass
+        start = int(((en.get("ranges") or [{}])[0]).get("start", 0) or 0)
         return {
             "prefixes": len(cfg.get("prefixes", []) or []),
             "variable_length": en.get("variable_length", 0),
             "single_char_length": scl,
-            "charset_size": (size // scl) if scl else 0,
+            "charset_size": self._charset_size(cs),
+            "tested": start / 1e12,
         }
 
     def _advance_config_start(self):
-        """把本次已处理的候选数加到配置文件里每个前缀区间的 start 上。
+        """把配置里每个前缀区间的 ``start`` 推进到「续测起点 + 本次处理量」。
 
-        语义（与「自动更新 start」复选框对应）：
-          配置里的 ``start`` 推进 ``本次会话处理量``，于是下次直接点「开始」就是从
-          上次停下的位置继续，不需要依赖续测。**关闭窗口时也会执行**（见 _close）。
+        语义（与「自动更新 start」复选框对应）：结束时把本次扫描过的量记进配置，
+        于是下次直接点「开始」就从停下的位置继续，不必依赖续测。**关闭窗口时也会执行**。
+
+        为什么基准取「续测起点」而不是配置文件里的 start：
+          勾了续测时本次是从结果文件推出的位置（可能远大于配置里的 start）开始扫的。
+          若只按 ``配置 start + 处理量`` 回写，start 会比实际扫到的位置**落后**一截，
+          下次启动就会把这中间已经扫过的区间重扫一遍。所以基准取
+          ``本次实际起步位置``（``_run_effective_start``：未续测时等于配置 start，
+          续测时等于续测后的 start）。
 
         实现要点：
-          * 基准是**本次运行起步时的 config 快照**（``_run_origin``），而不是磁盘当前内容 ——
-            否则续测场景下会把已经推进过的 start 再加一遍；
-          * 本次处理量取 ``self._run_processed``（进度行 ``count=X.XXXT`` 换算而来），
+          * 其余字段用**本次运行起步时的 config 快照**（``_run_origin``），而不是磁盘当前
+            内容 —— 否则续测场景下会把已经推进过的值再加一遍；
+          * 处理量取 ``self._run_processed``（进度行 ``count=X.XXXT`` 换算而来），
             它正是「已下发并算完的候选数」，与 start 的计数口径一致；
-          * 通过 ``task_id`` 反推本次实际覆盖的区间会不准（随机模式重叠），所以只用计数；
           * 仅在 ``enumeration.ranges`` 上推进：``prefix_ranges`` 是续测用的派生字段，
             回写它会把"临时续测范围"固化成配置，反而破坏语义；
           * 只写一次（``_run_start_updated``），避免 stop 与 close 重复累加。
@@ -2223,11 +2308,14 @@ class Monitor(tk.Tk):
             ranges = cfg.get("enumeration", {}).get("ranges") or []
             if not ranges:
                 return
+            base = self._run_effective_start
+            # 多区间时按各自相对首个区间的偏移平移，保持"每个区间都推进同样多"的语义
+            offset = base - int(ranges[0].get("start", 0) or 0)
             for item in ranges:
                 old = int(item.get("start", 0) or 0)
-                item["start"] = old + processed
+                item["start"] = old + offset + processed
             save_config(path, cfg)
-            self.status_var.set(f"已更新 {os.path.basename(path)} 的 start（+{processed}）")
+            self.status_var.set(f"已更新 {os.path.basename(path)} 的 start（→{base + processed}）")
         except Exception as exc:
             # 回写失败不能影响停止流程，只在状态栏提示
             self.status_var.set(f"更新 start 失败：{exc}")
@@ -2278,19 +2366,21 @@ class Monitor(tk.Tk):
             config_path = self._config_path()
             cfg = load_config(config_path)
             _validate_config(cfg)
-            # 记下本次运行的基准：起步时的 config 快照 + start。
-            # 结束时按「基准 + 本次处理量」回写，见 _advance_config_start。
-            self._run_origin = copy.deepcopy(cfg)
-            self._run_config_path = config_path
-            self._run_start = int((cfg.get("enumeration", {}).get("ranges") or [{}])[0].get("start", 0) or 0)
-            self._run_processed = 0
-            self._run_start_updated = False
             # Resume 仅支持枚举模式 1：位置由结果文件最后一条命中推出，不是精确检查点。
             if resume:
                 from .main import _resolve_result_file, _try_resume
                 resumed = _try_resume(cfg, _resolve_result_file(cfg["output"].get("result_file", "result.txt")))
                 if resumed is not None:
                     cfg = resumed[0]
+            # 记下本次运行的基准：起步时的 config 快照 + **实际**起步位置。
+            # 续测生效时 cfg 已被改写，所以这行必须放在续测之后。
+            # 结束/停止/关窗时按「续测起点 + 本次处理量」回写，见 _advance_config_start。
+            self._run_origin = copy.deepcopy(cfg)
+            self._run_config_path = config_path
+            self._run_effective_start = int(
+                ((cfg.get("enumeration", {}).get("ranges") or [{}])[0]).get("start", 0) or 0)
+            self._run_processed = 0
+            self._run_start_updated = False
             task = _build_task_config(copy.deepcopy(cfg))
             task["n_threads"] = int(self.threads_var.get())
             if not 1 <= task["n_threads"] <= 256:

@@ -247,5 +247,89 @@ class ConfigSelectorReuseTests(unittest.TestCase):
         self.assertIsNone(owner._config_selector, "结束后应清空引用")
 
 
+class CharsetSizeTests(unittest.TestCase):
+    # 字符集大小必须按 types 逐个累加，而不是只看 custom_values。
+    # 旧实现只用 custom_values 的字节长度估算，于是 types=[1,2,3]
+    # （数字10 + 小写26 + 大写26 = 62）被算成了 custom_values 里那串汉字的数字。
+    def test_counts_each_type_not_just_custom(self):
+        custom = "咦拜睡皮虎豹马鱼粗细挠猴木祝区腮瓜牢堡大小眼晕气灵憋笑"
+        # 数字 + 小写 + 大写 = 62，完全不含自定义字符
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 1, "types": [1, 2, 3], "custom_values": custom}), 62)
+        # 各自单独算
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 1, "types": [1], "custom_values": ""}), 10)
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 1, "types": [2], "custom_values": ""}), 26)
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 1, "types": [3], "custom_values": ""}), 26)
+        # 加上自定义字符后应等于三者和
+        size_with_custom = ui.Monitor._charset_size(
+            {"single_char_length": 1, "types": [1, 2, 3, 4], "custom_values": custom})
+        self.assertGreater(size_with_custom, 62)
+
+    # 非 1 字节的单元也要能算：自定义字符按 UTF-8 字节数 / scl 向下取整。
+    # 期望值由字符串本身推导，避免手算出错。
+    def test_multi_byte_custom(self):
+        custom = "护球盘带过人摆脱拉球扣球趟球内切"      # 汉字，UTF-8 每字 3 字节
+        expected = (len(custom.encode("utf-8")) // 6)
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 6, "types": [1], "custom_values": custom}), expected)
+        self.assertGreater(expected, 0)
+
+    # 非法/缺失输入不能抛异常（表格要能把坏配置也列出来）
+    def test_malformed_input_is_safe(self):
+        self.assertEqual(ui.Monitor._charset_size({}), 0)
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 0, "types": [1]}), 0)
+        self.assertEqual(ui.Monitor._charset_size(
+            {"single_char_length": 1, "types": [4], "custom_values": ["x"]}), 0)
+
+
+class AdvanceStartTests(unittest.TestCase):
+    # 续测叠加语义：回写基准是**本次实际起步位置**（续测起点），不是配置文件里的 start。
+    # 否则续测过的会话会把 start 写小，下次启动重扫一段。
+    def test_resume_uses_effective_start_as_base(self):
+        import copy as _copy
+        import tempfile
+        from pathlib import Path
+        cfg = ui.load_config("config_football.yaml")
+        cfg["enumeration"]["ranges"] = [{"start": 1000, "end": -1}]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "t.yaml"
+            ui.save_config(target, cfg)
+            origin = _copy.deepcopy(cfg)
+            owner = SimpleNamespace(
+                auto_start_var=SimpleNamespace(get=lambda: True),
+                _run_origin=origin, _run_config_path=str(target),
+                # 配置里是 1000，但本次续测从 800000 起步
+                _run_effective_start=800_000, _run_processed=5_000_000,
+                _run_start_updated=False, status_var=SimpleNamespace(set=lambda *_: None))
+            Monitor._advance_config_start(owner)
+            got = ui.load_config(str(target))["enumeration"]["ranges"][0]["start"]
+        # 续测起点 + 处理量；旧实现会写成 1000+5000000=5001000（落后）
+        self.assertEqual(got, 5_800_000)
+
+    # 未勾选「自动更新 start」时不动配置。
+    def test_disabled_does_not_touch_config(self):
+        import copy as _copy
+        import tempfile
+        from pathlib import Path
+        cfg = ui.load_config("config_football.yaml")
+        cfg["enumeration"]["ranges"] = [{"start": 1000, "end": -1}]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "t.yaml"
+            ui.save_config(target, cfg)
+            origin = _copy.deepcopy(cfg)
+            owner = SimpleNamespace(
+                auto_start_var=SimpleNamespace(get=lambda: False),
+                _run_origin=origin, _run_config_path=str(target),
+                _run_effective_start=1000, _run_processed=5_000_000,
+                _run_start_updated=False, status_var=SimpleNamespace(set=lambda *_: None))
+            Monitor._advance_config_start(owner)
+            got = ui.load_config(str(target))["enumeration"]["ranges"][0]["start"]
+        self.assertEqual(got, 1000)
+
+
 if __name__ == "__main__":
     unittest.main()
