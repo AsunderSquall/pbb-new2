@@ -821,15 +821,18 @@ class Monitor(tk.Tk):
         self._build_main_result_file(controls)
         launch_options = ttk.Frame(controls)
         launch_options.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        launch_options.columnconfigure(0, weight=1)
+        launch_options.columnconfigure(1, weight=1)
+        # 三个复选框不再挤在一行：挤在一起时「自动更新 start」会被侧栏右边缘截断。
+        # 前两个同在红色标题行，第三个单独一行、左对齐（与上面两行文字同一起点）。
         self.resume_checkbutton = self._checkbutton(launch_options, "读入文件并续测", self.resume_var)
-        self.resume_checkbutton.pack(side="left")
+        self.resume_checkbutton.grid(row=0, column=0, sticky="w")
         self.rebuild_checkbutton = self._checkbutton(launch_options, "Rebuild 引擎", self.rebuild_var)
-        self.rebuild_checkbutton.pack(side="left", padx=(12, 0))
-        # 与「读入文件并续测」同一行的第二个复选框：结束时把配置里的 start 往前推。
-        # 默认勾选 —— 这样下次不需要续测也能从上次的位置接着算。
+        self.rebuild_checkbutton.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        # 结束时把配置里的 start 往前推（默认勾选）—— 这样下次不需要续测也能接着算。
         self.auto_start_checkbutton = self._checkbutton(
             launch_options, "自动更新 start", self.auto_start_var)
-        self.auto_start_checkbutton.pack(side="left", padx=(12, 0))
+        self.auto_start_checkbutton.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.start_button = ttk.Button(controls, text="开始", command=self._start)
         self.start_button.grid(row=12, column=0, sticky="ew", pady=(10, 0))
         self.stop_button = ttk.Button(controls, text="停止", command=self._stop, state="disabled")
@@ -921,7 +924,10 @@ class Monitor(tk.Tk):
                     activebackground=colors["bg"], activeforeground=colors["text"],
                     selectcolor=colors["field"], font=(UI_FONT, 11),
                 )
-        for checkbox in (self.resume_checkbutton, self.rebuild_checkbutton):
+        # 三个「启动选项」复选框统一样式：红色 + 粗体，与右上角的启用提示同一格式。
+        # 新增复选框时必须一并加入这里，否则会退化成黑色常规体（曾经漏掉「自动更新 start」）。
+        for checkbox in (self.resume_checkbutton, self.rebuild_checkbutton,
+                         self.auto_start_checkbutton):
             checkbox.configure(foreground=launch_red, activeforeground=launch_red,
                                disabledforeground=launch_red, font=(UI_FONT, 11, "bold"))
         for view in self.score_views.values():
@@ -2287,6 +2293,8 @@ class Monitor(tk.Tk):
         self.start_threads_spinbox.configure(state="disabled")
         self.resume_checkbutton.configure(state="disabled")
         self.rebuild_checkbutton.configure(state="disabled")
+        # 运行中锁住：自动更新 start 是在"结束时"才回写的，跑到一半改它没有意义
+        self.auto_start_checkbutton.configure(state="disabled")
         self._write_runtime_threads(self.runtime_thread_limit)
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
@@ -2584,6 +2592,7 @@ class Monitor(tk.Tk):
         self.start_threads_spinbox.configure(state="normal")
         self.resume_checkbutton.configure(state="normal")
         self.rebuild_checkbutton.configure(state="normal")
+        self.auto_start_checkbutton.configure(state="normal")
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.status_var.set(status)
