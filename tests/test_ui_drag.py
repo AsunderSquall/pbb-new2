@@ -185,5 +185,31 @@ class CloseTests(unittest.TestCase):
         self.assertEqual(owner._after_ids, set())
 
 
+class BlankConfigTests(unittest.TestCase):
+    # 「编辑新配置」从一份空白配置起步，所以这份配置必须**先能通过校验**，
+    # 否则用户一打开编辑器就被报错拦住，根本没法从空白开始填。
+    def test_blank_config_passes_validation(self):
+        from pbb.main import _validate_config
+        cfg = ui.blank_config()
+        _validate_config(cfg)                      # 不抛异常即通过
+        # 必填项不能为空，否则校验必然失败
+        self.assertTrue(str(cfg["team_name"]).strip())
+        self.assertIn("character_set", cfg)
+        self.assertTrue(cfg["enumeration"]["ranges"])
+
+    # 空白配置要能存成 YAML 再读回并仍然合法 —— 保存路径不能产生坏文件，
+    # 否则「保存后才加入表格」加入的就是一份读不回来的配置。
+    def test_blank_config_round_trips(self):
+        import tempfile
+        from pathlib import Path
+        cfg = ui.blank_config()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "blank.yaml"
+            ui.save_config(path, cfg)
+            back = ui.load_config(str(path))
+        self.assertEqual(back["team_name"], cfg["team_name"])
+        self.assertEqual(back["enumeration"]["mode"], cfg["enumeration"]["mode"])
+
+
 if __name__ == "__main__":
     unittest.main()

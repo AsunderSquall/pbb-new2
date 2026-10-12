@@ -77,6 +77,50 @@ COUNT_RE = re.compile(r"count:([0-9.]+)T")
 CURRENT_RE = re.compile(r"cur_speed:([0-9.]+)T/d")
 
 
+def blank_config() -> dict:
+    """构造一份「空白但合法」的配置，供「编辑新配置」使用。
+
+    来自 CONFIG_MAP 的字段直接用其默认值（那里是 config→engine 的唯一真源）；
+    CONFIG_MAP 不覆盖的嵌套结构（character_set / enumeration.ranges / prefixes /
+    suffixes）在这里补最小可用取值。目标不是"一份好配置"，而是**能通过
+    _validate_config 并打开编辑器**，让用户从空白开始填。
+
+    关键取舍：
+      - 字符集用「自定义字符」且给一个非空占位（校验要求自定义字符非空），
+        并把它写成 "" + 2 个占位字符，避免用户面对一个必然报错的空配置；
+      - 前缀/后缀各留一个空前缀、空后缀（配置语义里 "+" 就是空串）；
+      - team_name 必须非空，否则校验直接失败，所以给一个占位名提醒用户去改。
+    """
+    from .config_schema import CONFIG_MAP
+    cfg: dict = {}
+    for fd in CONFIG_MAP:
+        if fd.default is None:
+            continue                      # required 且无默认值的字段在下面手工给
+        parts = fd.config_path.split(".")
+        node = cfg
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = fd.default
+
+    # team_name 必须非空（校验会拒绝空值），给一个占位名提醒用户去改
+    cfg["team_name"] = "请填写队伍名"
+    cfg["character_set"] = {
+        "single_char_length": 1,
+        "types": [1],
+        "custom_values": "示例",
+        "unicode_ranges": [],
+        "output_charset": 1,
+    }
+    cfg["enumeration"] = {
+        "mode": 2,
+        "variable_length": 6,
+        "ranges": [{"start": 0, "end": -1}],
+    }
+    cfg["prefixes"] = [{"name": ""}]
+    cfg["suffixes"] = [{"name": ""}]
+    return cfg
+
+
 def _normalize_score_list(raw) -> list[str]:
     """把 score_list 的原始写法归一成有序的族名列表（``rh`` → ``fs``、去重、丢弃无效项）。
 
@@ -388,11 +432,18 @@ class ConfigSelector(tk.Toplevel):
 
         table = ttk.Frame(body)
         table.pack(fill="both", expand=True)
+        # 表格字号放大：默认 ttk 字号偏小，配置名与参数不易扫读。
+        # 同时抬高行高，否则放大的字会被行剪裁。
+        table_style = ttk.Style(self)
+        table_style.configure("Config.Treeview", font=(UI_FONT, 12), rowheight=pixels(30))
+        table_style.configure("Config.Treeview.Heading", font=(UI_FONT, 12, "bold"))
         self.tree = ttk.Treeview(
-            table, columns=[c[0] for c in self.COLUMNS], show="headings", selectmode="browse")
+            table, columns=[c[0] for c in self.COLUMNS], show="headings", selectmode="browse",
+            style="Config.Treeview")
         for key, title, width in self.COLUMNS:
             self.tree.heading(key, text=title)
-            self.tree.column(key, width=width, anchor="w", stretch=(key == "name"))
+            # 列宽也是像素，按 DPI 换算，否则高 DPI 下标题会被截断
+            self.tree.column(key, width=pixels(width), anchor="w", stretch=(key == "name"))
         scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -550,43 +601,24 @@ class ConfigSelector(tk.Toplevel):
             self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
 
     def _new_config(self):
-        """以当前配置（没有则用仓库里的示例配置）为模板新建一个配置并打开编辑器。
+        """打开一个**空白**的配置编辑页；点「保存」后才写入 config/ 并出现在表格里。
 
-        新文件名默认 ``新配置.yaml``，重名自动加序号 —— 让用户主要操心参数，
-        而不是先想一个不重名的文件名。
+        与旧行为的区别：以前是「先复制一份现有配置落盘，再打开编辑器」，于是表格里会立刻
+        多出一行 —— 用户还没开始编辑就已经产生了文件，取消编辑还会留下垃圾。
+        现在只在内存里准备一份空白配置交给编辑器，**不落盘**；文件名也预先填好一个
+        不重名的建议值，用户改完点保存即可。
         """
-        templates = []
-        current = self.monitor._config_path()
-        if current and os.path.isfile(current):
-            templates.append(current)
-        templates.extend(p for p in self._config_files()
-                         if os.path.abspath(p) not in {os.path.abspath(t) for t in templates})
-        cfg = None
-        for candidate in templates:
-            try:
-                cfg = load_config(candidate)
-                break
-            except Exception:
-                continue
-        if cfg is None:
-            messagebox.showerror("无法新建配置", "config/ 下没有可用作模板的配置文件。", parent=self)
-            return
-
+        cfg = blank_config()
         stem = "新配置"
         target = os.path.join(CONFIG_DIR, f"{stem}.yaml")
         index = 2
         while os.path.exists(target):
             target = os.path.join(CONFIG_DIR, f"{stem}_{index}.yaml")
             index += 1
-        try:
-            save_config(target, cfg)
-        except Exception as exc:
-            messagebox.showerror("无法新建配置", str(exc), parent=self)
-            return
-        self.refresh()
-        self.monitor.status_var.set(f"已新建 {os.path.basename(target)}")
+        self.monitor._pending_editor_cfg = cfg
         self.monitor._open_editor_for(target)
         if self.monitor.editor is not None:
+            # 编辑器保留建议文件名；保存后才需要刷新表格（此时表格里才会新增一行）
             self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
 
 
@@ -680,6 +712,8 @@ class Monitor(tk.Tk):
         self.auto_start_var = tk.BooleanVar(value=True)
         # 本次运行用于回写 start 的账：以哪个 start 起步、本会话处理了多少候选。
         self._run_origin: dict | None = None
+        # 「编辑新配置」预置的空白配置：非 None 时编辑器用它而不是读文件
+        self._pending_editor_cfg: dict | None = None
         self._run_start: int = 0
         self._run_processed: int = 0
         self._run_config_path: str | None = None
@@ -1551,12 +1585,19 @@ class Monitor(tk.Tk):
         if self.editor and self.editor.winfo_exists():
             self.editor.lift()
             return
-        try:
-            cfg = load_config(self.config_var.get())
-            _validate_config(cfg)
-        except Exception as exc:
-            messagebox.showerror("无法导入配置", str(exc), parent=self)
-            return
+        # 新建配置时由调用方预置一份空白配置（见 _start_new_config），
+        # 此时没有文件可读，也**不写盘** —— 只有点「保存」才落盘并进入表格。
+        pending = self._pending_editor_cfg
+        self._pending_editor_cfg = None
+        if pending is not None:
+            cfg = copy.deepcopy(pending)
+        else:
+            try:
+                cfg = load_config(self.config_var.get())
+                _validate_config(cfg)
+            except Exception as exc:
+                messagebox.showerror("无法导入配置", str(exc), parent=self)
+                return
         self.editor_cfg = copy.deepcopy(cfg)
         editor = tk.Toplevel(self)
         self.editor = editor
