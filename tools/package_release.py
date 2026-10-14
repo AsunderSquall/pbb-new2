@@ -176,6 +176,7 @@ def source_paths():
         "tests/test_config_location.py", "tests/test_docstring_coverage.py",
         "tests/test_ui_affixes.py", "tests/test_ui_drag.py", "tests/test_ui_engine.py", "tests/test_flex.py",
         "tests/test_qp_filter.py", "tests/native_qp_filter.cpp", "tests/test_threading_config.py",
+        "tests/test_ui_start.py",
         # 发布包内的自动测速入口与开发入口。
         "tune_quick.bat", "tune_full.bat", "run.bat", "run.sh", "run_ui.bat",
         # 配置模板（发布包 config/ 由 distribution_configs() 统一生成，这里只在源码目录留示例）。

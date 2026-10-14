@@ -2492,7 +2492,7 @@ class Monitor(tk.Tk):
             self._run_result_file = _resolve_result_file(self._selected_result_file())
             # 格式顺序任务使用连续完成检查点；旧配置保留命中反推语义。
             if resume:
-                from .main import _resolve_result_file, _try_resume
+                from .main import _try_resume
                 resumed = _try_resume(cfg, self._run_result_file, out_dir=ROOT)
                 if resumed is not None:
                     cfg = resumed[0]
