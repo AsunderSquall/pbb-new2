@@ -198,7 +198,10 @@ def save_config(path, cfg):
         raise ValueError('请选择 .yaml、.yml、.json 或 .toml 配置文件。')
     temporary = target.with_suffix(target.suffix+'.tmp')
     try:
-        temporary.write_text(text, encoding='utf8')
+        with temporary.open('w', encoding='utf8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, target)
     finally:
         if temporary.exists():temporary.unlink()
@@ -843,6 +846,13 @@ class Monitor(tk.Tk):
         self._apply_theme()
         self._schedule_after(150, self._drain_events)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        from .session_guard import SessionGuard
+        try:
+            self._session_guard = SessionGuard(self, self._save_session_progress)
+        except OSError as exc:
+            self._session_guard = None
+            self.status_var.set(f'关机通知保护不可用，定期保存仍可用：{exc}')
+        self._next_progress_save = time.monotonic() + 30
 
     def _build_layout(self):
         style = ttk.Style(self)
@@ -1004,6 +1014,7 @@ class Monitor(tk.Tk):
         style.configure("LaunchNotice.TLabel", background=colors["bg"], foreground=launch_red,
                         font=(UI_FONT, 12, "bold"))
         style.configure("TButton", background=colors["panel"], foreground=colors["text"], font=(UI_FONT, 11))
+        style.configure("ScoreAction.TButton", font=(UI_FONT, 10), padding=(5, 2))
         style.map("TButton", background=[("active", colors["field"])], foreground=[("disabled", "#808080")])
         style.configure("TEntry", fieldbackground=colors["field"], foreground=colors["text"], insertcolor=colors["text"], font=(UI_FONT, 11))
         style.configure("TSpinbox", fieldbackground=colors["field"], foreground=colors["text"], insertcolor=colors["text"], font=(UI_FONT, 11))
@@ -1026,9 +1037,10 @@ class Monitor(tk.Tk):
                          self.auto_start_checkbutton):
             checkbox.configure(foreground=launch_red, activeforeground=launch_red,
                                disabledforeground=launch_red, font=(UI_FONT, 11, "bold"))
-        for view in self.score_views.values():
+        for family, view in self.score_views.items():
             if isinstance(view, tk.Text):
-                view.configure(bg=colors["field"], fg=colors["text"], font=(UI_FONT, 11))
+                background = colors["field"] if family in self.expanded_families else colors["bg"]
+                view.configure(bg=background, fg=colors["text"], font=(UI_FONT, 11))
 
     def _build_main_result_file(self, controls):
         """主窗口「结果文件」行：模式下拉框 + （仅自定义时可见的）文件名输入框。
@@ -1080,6 +1092,7 @@ class Monitor(tk.Tk):
         for child in self.score_area.winfo_children():
             child.destroy()
         self.score_views.clear()
+        self.score_copy_buttons = {}
         if not families:
             ttk.Label(self.score_area, text="选择配置后点击“开始”，这里会显示各评分族的第一名。", font=(UI_FONT, 12)).pack(anchor="center", pady=80)
             self._bind_wheel(self.score_canvas, self.score_area)
@@ -1095,6 +1108,7 @@ class Monitor(tk.Tk):
             ttk.Label(panel_header, text=f"{family_label} {label}", font=(UI_FONT, 12, "bold")).pack(side="left")
             ttk.Button(
                 panel_header, text="收起" if is_expanded else "展开",
+                style="ScoreAction.TButton", width=5,
                 command=lambda name=family: self._toggle_family(name),
             ).pack(side="right")
             if is_expanded:
@@ -1102,16 +1116,38 @@ class Monitor(tk.Tk):
                                bg=self.colors["field"], fg=self.colors["text"], relief="solid", borderwidth=1, padx=8, pady=6)
                 view.pack(fill="both", expand=True)
             else:
-                view = ttk.Entry(panel_header, state="readonly", width=1,
-                                 font=(UI_FONT, 11), exportselection=False)
-                view._score_var = tk.StringVar(master=panel_header, value="-")
-                view.configure(textvariable=view._score_var)
-                view.pack(side="left", fill="x", expand=True, padx=(18, 8))
+                button = ttk.Button(panel_header, text="复制",
+                    style="ScoreAction.TButton", width=5,
+                    command=lambda name=family: self._copy_top1(name),
+                    state="normal" if self.boards.get(family) else "disabled")
+                button.pack(side="right", padx=(0, 6))
+                self.score_copy_buttons[family] = button
+                # 外观与原标签一致，但可划选、Ctrl+C；无边框或输入框背景。
+                view = tk.Text(panel_header, height=1, width=1, wrap="none", state="disabled",
+                               font=(UI_FONT, 11), bg=self.colors["bg"], fg=self.colors["text"],
+                               relief="flat", borderwidth=0, highlightthickness=0,
+                               padx=0, pady=0, exportselection=False, cursor="xterm")
+                view.bind("<Button-1>", lambda event: event.widget.focus_set(), add="+")
+                view.bind("<Control-a>", self._select_score_text)
+                view.pack(side="left", fill="x", expand=True, padx=(18, 0))
             self.score_views[family] = view
         self.score_area.columnconfigure(0, weight=1)
         # 面板建完之后才绑滚轮：_bind_wheel 只遍历"当前已存在"的控件，
         # 放在建面板之前会漏掉全部面板（只剩 score_area 自己绑上）。
         self._bind_wheel(self.score_canvas, self.score_area)
+
+    def _copy_top1(self, family: str):
+        """复制点击时该族第一名的完整名字@队伍，不附加评分。"""
+        entries = self.boards.get(family, [])
+        if entries:
+            self.clipboard_clear()
+            self.clipboard_append(entries[0][1])
+
+    @staticmethod
+    def _select_score_text(event):
+        """只读Top1文字支持Ctrl+A全选，Ctrl+C沿用Tk文本控件复制。"""
+        event.widget.tag_add("sel", "1.0", "end-1c")
+        return "break"
 
     def _expand_top5(self):
         self.expanded_families = set(self.families)
@@ -2381,7 +2417,7 @@ class Monitor(tk.Tk):
             summary['charset_size'] = '/'.join(str(self._charset_size(cs)) for cs in families.values())
         return summary
 
-    def _advance_config_start(self):
+    def _advance_config_start(self, *, final=True):
         """把配置里每个前缀区间的 ``start`` 推进到「续测起点 + 本次处理量」。
 
         语义（与「自动更新 start」复选框对应）：结束时把本次扫描过的量记进配置，
@@ -2405,7 +2441,6 @@ class Monitor(tk.Tk):
         """
         if self._run_start_updated:
             return
-        self._run_start_updated = True
         if not self.auto_start_var.get():
             return
         origin = self._run_origin
@@ -2415,6 +2450,9 @@ class Monitor(tk.Tk):
             return
         try:
             cfg = copy.deepcopy(origin)
+            expected = getattr(self, '_run_last_saved_config', None)
+            if isinstance(expected, dict) and load_config(path) != expected:
+                raise ValueError('配置在运行中被修改，保留磁盘配置，请使用 Resume 恢复检查点')
             if 'format' in cfg:
                 from .main import _try_resume
                 result_file = getattr(self, '_run_result_file', None)
@@ -2424,6 +2462,9 @@ class Monitor(tk.Tk):
                 if resumed is None:
                     return
                 save_config(path, resumed[0])
+                self._run_last_saved_config = copy.deepcopy(resumed[0])
+                if final:
+                    self._run_start_updated = True
                 self.status_var.set('已按各前缀连续完成检查点更新起点')
                 return
             ranges = cfg.get("enumeration", {}).get("ranges") or []
@@ -2436,10 +2477,29 @@ class Monitor(tk.Tk):
                 old = int(item.get("start", 0) or 0)
                 item["start"] = old + offset + processed
             save_config(path, cfg)
+            self._run_last_saved_config = copy.deepcopy(cfg)
+            if final:
+                self._run_start_updated = True
             self.status_var.set(f"已更新 {os.path.basename(path)} 的 start（→{base + processed}）")
         except Exception as exc:
             # 回写失败不能影响停止流程，只在状态栏提示
             self.status_var.set(f"更新 start 失败：{exc}")
+
+    def _save_session_progress(self):
+        """Session query may be cancelled: save without finalizing this run."""
+        if self.running:
+            self._advance_config_start(final=False)
+
+    def _periodic_progress_save(self):
+        """Every 30 seconds mirror a safe flex frontier into the selected config."""
+        now = time.monotonic()
+        if now < self._next_progress_save:
+            return
+        self._next_progress_save = now + 30
+        origin = self._run_origin or {}
+        # Only a contiguous checkpoint proves that advancing cannot skip holes.
+        if self.running and 'format' in origin and origin.get('enumeration', {}).get('mode') == 1:
+            self._advance_config_start(final=False)
 
     def _open_editor_for(self, path: str):
         """打开编辑器并载入指定配置文件（供配置选择器调用）。"""
@@ -2486,6 +2546,7 @@ class Monitor(tk.Tk):
         try:
             config_path = self._config_path()
             cfg = load_config(config_path)
+            self._run_last_saved_config = copy.deepcopy(cfg)
             _validate_config(cfg)
             if 'format' in cfg and not cfg['enumeration'].get('prefix_ranges'):
                 cfg['enumeration']['ranges'][0]['end'] = int(self.range_var.get())
@@ -2534,7 +2595,7 @@ class Monitor(tk.Tk):
         self.start_threads_spinbox.configure(state="disabled")
         self.resume_checkbutton.configure(state="disabled")
         self.rebuild_checkbutton.configure(state="disabled")
-        # 运行中锁住：自动更新 start 是在"结束时"才回写的，跑到一半改它没有意义
+        # 运行中锁住本次的保存策略，多族顺序任务还会定期回写安全检查点。
         self.auto_start_checkbutton.configure(state="disabled")
         self._write_runtime_threads(self.runtime_thread_limit)
         self.start_button.configure(state="disabled")
@@ -2721,6 +2782,7 @@ class Monitor(tk.Tk):
             self._refresh_boards()
             self.boards_dirty = False
             self.last_board_refresh = time.monotonic()
+        self._periodic_progress_save()
         # Never monopolize Tk's event loop when the engine writes progress fast.
         # 用 _schedule_after 记账，关闭时才能把这些待执行回调取消掉（见 _close）。
         self._schedule_after(50 if self.running else 150, self._drain_events)
@@ -2780,6 +2842,9 @@ class Monitor(tk.Tk):
         """
         for family, view in self.score_views.items():
             entries = self.boards.get(family, [])
+            button = self.score_copy_buttons.get(family)
+            if button is not None:
+                button.configure(state="normal" if entries else "disabled")
             limit = 5 if family in self.expanded_families else 1
             if limit == 1:
                 lines = [f"{score:>6}  {name}" for score, name in entries[:1]]
@@ -2794,10 +2859,6 @@ class Monitor(tk.Tk):
                 view.delete("1.0", "end")
                 view.insert("1.0", "\n".join(lines))
                 view.configure(state="disabled")
-            elif isinstance(view, ttk.Entry):
-                # 定时刷新未变的名次时不重写，避免用户划选复制时选区消失。
-                if view.get() != lines[0]:
-                    view._score_var.set(lines[0])
             else:
                 view.configure(text=lines[0])
 
@@ -2888,6 +2949,9 @@ class Monitor(tk.Tk):
            ``destroy()`` 释放窗口，才能干净退出。
         """
         self._closing = True
+        guard = getattr(self, '_session_guard', None)
+        if guard is not None:
+            guard.close()
         self._cancel_scheduled_after()
         # 关闭窗口也要把 start 推进（用户可能直接点 X 而不点「停止」）。
         # 这里在 _stop() 之前调用，因为 _stop() 里也会调一次；靠 _run_start_updated 去重。

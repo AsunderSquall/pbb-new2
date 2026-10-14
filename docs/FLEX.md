@@ -34,7 +34,32 @@ format: ["编号", {charset: 汉字}, "-", {charset: 数字}, {charset: 数字}]
 输出规则身份包含当前QP二次扣分版本；旧QP−PP或幻影硬过滤规则的检查点不能与当前结果混用，需换用新的结果文件并从配置起点测。
 UI 的自动更新起点也按各前缀检查点更新，不再用所有线程的处理量累加到单一起点。
 
+勾选「自动更新 start」时，多族顺序任务还会约每 30 秒把各前缀的连续完成位置写回配置；
+因此异常退出后，即使不勾 Resume，也能从最近一次已写回的位置重新开始，可能重复一段。
+勾选 Resume 则读取引擎最近发布的 `.resume` 检查点。随机模式及旧格式不新增定期推进。
+Windows 关机/注销通知会触发一次保存，取消关机后仍能继续保存。保存失败允许后续重试；
+运行期间手动改过磁盘配置时不覆盖它，应保留对应结果文件并用 Resume 恢复。
+
+配置采用「临时文件 → flush/fsync → 原子替换」；这减少异常退出导致半截配置的风险，
+但无法保证断电时磁盘缓存、结果文件和检查点全部持久化，也不承诺最多只重复 30 秒。
+测试使用独立窗口的 WM_QUERYENDSESSION/WM_ENDSESSION 消息及强杀临时子进程，
+不会发起真正的关机、注销或系统广播；这不等于已验证实际关机或物理断电。
+
 ## 从文件导入
+
+随包提供 `config/config_words_sequential.yaml` 和外层 `charsets/` 四份词库，使用：
+
+```yaml
+character_sets:
+  形容词: {single_char_length: 6, file: ../charsets/adjectives.txt}
+  名词: {single_char_length: 6, file: ../charsets/nouns.txt}
+  副词: {single_char_length: 6, file: ../charsets/adverbs.txt}
+  动词: {single_char_length: 6, file: ../charsets/verbs.txt}
+format: [{charset: 形容词}, "的", {charset: 名词}, {charset: 副词}, "地", {charset: 动词}]
+```
+
+该案例无前后缀，从0开始顺序枚举，动词最先变化。例如 `重要的经济必须地发展`。
+PP/PD同时参与筛选，阈值为8000/8800；其余阈值沿用生产配置。词库放在配置目录旁的 `charsets/`，移动时保留相对位置。
 
 ```yaml
 character_sets:

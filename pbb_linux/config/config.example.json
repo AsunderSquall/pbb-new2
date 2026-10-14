@@ -72,6 +72,8 @@
     "_comment_xp": "虚评最低阈值",
 
     "min_qd": 6200,
+    "min_pp": 8000,
+    "min_pd": 8800,
     "min_cqd": 4000,
     "_comment_xd": "虚单最低阈值 (与虚评为或关系)",
 
@@ -89,7 +91,7 @@
     "ptt_pj": 4500,
     "_comment_ptt": "SP2 族潜在值(potential)阈值: base 换成 63 后该族能达到的理论最高分",
 
-    "score_list": "qp,qd,cqd,cp,fp,wc,fs,pj",
+    "score_list": "qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj",
     "_comment_score_list": "要计算哪些评分族(逗号分隔或列表); 留空=全部 10 族, 可选: qp qd pp pd cqd cp fp wc fs(别名 rh) pj",
 
     "score_mode": "all",
