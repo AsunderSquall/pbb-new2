@@ -68,6 +68,8 @@ collection:
 
   # 虚单最低阈值 (与虚评为或关系)
   min_qd: 6200
+  min_pp: 8000
+  min_pd: 8800
   min_cqd: 4000
 
   # 其余各族最低阈值 (未列出 = 0 = 不门控)
@@ -86,7 +88,7 @@ collection:
 
   # 要计算哪些评分族 (逗号分隔或列表); 留空 = 全部 10 族
   # 可选: qp qd pp pd cqd cp fp wc fs(别名 rh) pj
-  score_list: "qp,qd,cqd,cp,fp,wc,fs,pj"
+  score_list: "qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj"
 
   # all=全部算完; any=按 score_list 顺序, 遇首个达标族即停止后续计算
   score_mode: all

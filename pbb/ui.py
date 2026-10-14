@@ -24,11 +24,12 @@ import time
 import tkinter as tk
 from pathlib import Path
 from datetime import datetime
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import build_settings, engine as engine_runner, paths
 from ._build import _compile_engine, _binary_is_current, ensure_core
 from .main import _build_task_config, _resolve_result_file, _validate_config
+from .threading_config import available_threads, resolve_threads
 
 
 # 数据根：开发仓库里是仓库根，PyInstaller 冻结后是 _internal/。
@@ -102,6 +103,10 @@ def blank_config() -> dict:
             node = node.setdefault(part, {})
         node[parts[-1]] = fd.default
 
+    # 新配置采用 PP/PD 默认门阈值；缺省字段的旧配置仍按 CONFIG_MAP 的 0 解释。
+    cfg['collection']['min_pp'] = 8000
+    cfg['collection']['min_pd'] = 8800
+
     # team_name 必须非空（校验会拒绝空值），给一个占位名提醒用户去改
     cfg["team_name"] = "请填写队伍名"
     cfg["character_set"] = {
@@ -149,12 +154,17 @@ def load_config(path: str) -> dict:
     if suffix == ".toml":
         with open(path, "rb") as fh:
             import tomllib
-            return tomllib.load(fh)
+            cfg = tomllib.load(fh)
+        from .flex import resolve_files
+        return resolve_files(cfg, path)
     with open(path, "r", encoding="utf-8") as fh:
         if suffix in (".yaml", ".yml"):
             import yaml
-            return yaml.safe_load(fh)
-        return json.load(fh)
+            cfg = yaml.safe_load(fh)
+        else:
+            cfg = json.load(fh)
+    from .flex import resolve_files
+    return resolve_files(cfg, path)
 
 
 def save_config(path, cfg):
@@ -188,7 +198,10 @@ def save_config(path, cfg):
         raise ValueError('请选择 .yaml、.yml、.json 或 .toml 配置文件。')
     temporary = target.with_suffix(target.suffix+'.tmp')
     try:
-        temporary.write_text(text, encoding='utf8')
+        with temporary.open('w', encoding='utf8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, target)
     finally:
         if temporary.exists():temporary.unlink()
@@ -529,6 +542,8 @@ class ConfigSelector(tk.Toplevel):
         """
         if not isinstance(cfg, dict):
             return False
+        if 'format' in cfg or 'character_sets' in cfg:
+            return all(key in cfg for key in ('format', 'character_sets', 'enumeration', 'collection'))
         return all(key in cfg for key in cls._CONFIG_SECTIONS)
 
     def _config_files(self) -> list[str]:
@@ -795,7 +810,7 @@ class Monitor(tk.Tk):
         # 只显示文件名。两者通过 _config_path() 保持一致。
         self.config_var = tk.StringVar(value=default_config)
         self.config_name_var = tk.StringVar(value=os.path.basename(default_config))
-        self.threads_var = tk.StringVar(value=str(os.cpu_count() or 4))
+        self.threads_var = tk.StringVar(value=str(available_threads()))
         self.runtime_threads_var = tk.StringVar(value=self.threads_var.get())
         self.runtime_thread_limit = 0
         self.runtime_active_threads = 0
@@ -831,6 +846,13 @@ class Monitor(tk.Tk):
         self._apply_theme()
         self._schedule_after(150, self._drain_events)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        from .session_guard import SessionGuard
+        try:
+            self._session_guard = SessionGuard(self, self._save_session_progress)
+        except OSError as exc:
+            self._session_guard = None
+            self.status_var.set(f'关机通知保护不可用，定期保存仍可用：{exc}')
+        self._next_progress_save = time.monotonic() + 30
 
     def _build_layout(self):
         style = ttk.Style(self)
@@ -992,6 +1014,7 @@ class Monitor(tk.Tk):
         style.configure("LaunchNotice.TLabel", background=colors["bg"], foreground=launch_red,
                         font=(UI_FONT, 12, "bold"))
         style.configure("TButton", background=colors["panel"], foreground=colors["text"], font=(UI_FONT, 11))
+        style.configure("ScoreAction.TButton", font=(UI_FONT, 10), padding=(5, 2))
         style.map("TButton", background=[("active", colors["field"])], foreground=[("disabled", "#808080")])
         style.configure("TEntry", fieldbackground=colors["field"], foreground=colors["text"], insertcolor=colors["text"], font=(UI_FONT, 11))
         style.configure("TSpinbox", fieldbackground=colors["field"], foreground=colors["text"], insertcolor=colors["text"], font=(UI_FONT, 11))
@@ -1014,9 +1037,10 @@ class Monitor(tk.Tk):
                          self.auto_start_checkbutton):
             checkbox.configure(foreground=launch_red, activeforeground=launch_red,
                                disabledforeground=launch_red, font=(UI_FONT, 11, "bold"))
-        for view in self.score_views.values():
+        for family, view in self.score_views.items():
             if isinstance(view, tk.Text):
-                view.configure(bg=colors["field"], fg=colors["text"], font=(UI_FONT, 11))
+                background = colors["field"] if family in self.expanded_families else colors["bg"]
+                view.configure(bg=background, fg=colors["text"], font=(UI_FONT, 11))
 
     def _build_main_result_file(self, controls):
         """主窗口「结果文件」行：模式下拉框 + （仅自定义时可见的）文件名输入框。
@@ -1068,6 +1092,7 @@ class Monitor(tk.Tk):
         for child in self.score_area.winfo_children():
             child.destroy()
         self.score_views.clear()
+        self.score_copy_buttons = {}
         if not families:
             ttk.Label(self.score_area, text="选择配置后点击“开始”，这里会显示各评分族的第一名。", font=(UI_FONT, 12)).pack(anchor="center", pady=80)
             self._bind_wheel(self.score_canvas, self.score_area)
@@ -1083,6 +1108,7 @@ class Monitor(tk.Tk):
             ttk.Label(panel_header, text=f"{family_label} {label}", font=(UI_FONT, 12, "bold")).pack(side="left")
             ttk.Button(
                 panel_header, text="收起" if is_expanded else "展开",
+                style="ScoreAction.TButton", width=5,
                 command=lambda name=family: self._toggle_family(name),
             ).pack(side="right")
             if is_expanded:
@@ -1090,13 +1116,38 @@ class Monitor(tk.Tk):
                                bg=self.colors["field"], fg=self.colors["text"], relief="solid", borderwidth=1, padx=8, pady=6)
                 view.pack(fill="both", expand=True)
             else:
-                view = ttk.Label(panel_header, text="-", style="Score.TLabel")
-                view.pack(side="left", padx=(18, 0))
+                button = ttk.Button(panel_header, text="复制",
+                    style="ScoreAction.TButton", width=5,
+                    command=lambda name=family: self._copy_top1(name),
+                    state="normal" if self.boards.get(family) else "disabled")
+                button.pack(side="right", padx=(0, 6))
+                self.score_copy_buttons[family] = button
+                # 外观与原标签一致，但可划选、Ctrl+C；无边框或输入框背景。
+                view = tk.Text(panel_header, height=1, width=1, wrap="none", state="disabled",
+                               font=(UI_FONT, 11), bg=self.colors["bg"], fg=self.colors["text"],
+                               relief="flat", borderwidth=0, highlightthickness=0,
+                               padx=0, pady=0, exportselection=False, cursor="xterm")
+                view.bind("<Button-1>", lambda event: event.widget.focus_set(), add="+")
+                view.bind("<Control-a>", self._select_score_text)
+                view.pack(side="left", fill="x", expand=True, padx=(18, 0))
             self.score_views[family] = view
         self.score_area.columnconfigure(0, weight=1)
         # 面板建完之后才绑滚轮：_bind_wheel 只遍历"当前已存在"的控件，
         # 放在建面板之前会漏掉全部面板（只剩 score_area 自己绑上）。
         self._bind_wheel(self.score_canvas, self.score_area)
+
+    def _copy_top1(self, family: str):
+        """复制点击时该族第一名的完整名字@队伍，不附加评分。"""
+        entries = self.boards.get(family, [])
+        if entries:
+            self.clipboard_clear()
+            self.clipboard_append(entries[0][1])
+
+    @staticmethod
+    def _select_score_text(event):
+        """只读Top1文字支持Ctrl+A全选，Ctrl+C沿用Tk文本控件复制。"""
+        event.widget.tag_add("sel", "1.0", "end-1c")
+        return "break"
 
     def _expand_top5(self):
         self.expanded_families = set(self.families)
@@ -1148,7 +1199,7 @@ class Monitor(tk.Tk):
     def _sync_config_controls(self, cfg):
         if not self.running:
             threads = self._cfg_value(cfg, "threads.worker_threads", -1)
-            self.threads_var.set(str(os.cpu_count() or 4) if threads == -1 else str(threads))
+            self.threads_var.set(str(resolve_threads(threads)))
             families = self._families_from_task(cfg.get("collection", {}))
             if families != self.families:
                 self.families = families
@@ -1709,6 +1760,8 @@ class Monitor(tk.Tk):
             except Exception as exc:
                 messagebox.showerror("无法导入配置", str(exc), parent=self)
                 return
+        from .flex import normalize_config
+        cfg = normalize_config(cfg)
         self.editor_cfg = copy.deepcopy(cfg)
         editor = tk.Toplevel(self)
         self.editor = editor
@@ -1851,6 +1904,20 @@ class Monitor(tk.Tk):
         byte_box.bind("<<ComboboxSelected>>", self._refresh_charset_types)
         self._refresh_charset_types()
         basic.columnconfigure(1, weight=1)
+
+        # 格式配置和旧字符集编辑独立；保存时只有启用的方式生效。
+        flex_page = ttk.Frame(notebook, padding=18)
+        notebook.add(flex_page, text="多字符集格式")
+        self.flex_enabled_var = tk.BooleanVar(value='format' in cfg)
+        self._checkbutton(flex_page, "启用具名字符集与格式列表", self.flex_enabled_var).grid(row=0, column=0, columnspan=2, sticky='w')
+        ttk.Label(flex_page, text='格式字符串为固定内容；{"charset": "族名"} 表示一个可变位置。\n各族沿用基础页的字符集字段；族内每个枚举单元须等宽。', justify='left').grid(row=1, column=0, columnspan=2, sticky='w', pady=8)
+        _multiline_field(flex_page, 2, '字符集族（JSON）', 'flex.character_sets',
+                         json.dumps(cfg.get('character_sets', {'默认': cfg['character_set']}), ensure_ascii=False, indent=2), height_lines=12)
+        _multiline_field(flex_page, 3, '格式列表（JSON）', 'flex.format',
+                         json.dumps(cfg.get('format', [{'charset': '默认'}]), ensure_ascii=False, indent=2), height_lines=6)
+        flex_page.columnconfigure(1, weight=1)
+        ttk.Button(flex_page, text='从文件导入字符集（每行一个单元）', command=self._import_flex_file).grid(row=4, column=1, sticky='w', pady=8)
+        ttk.Button(flex_page, text='从文件导入字符集（逐字符）', command=lambda: self._import_flex_file('text')).grid(row=5, column=1, sticky='w', pady=8)
 
         affix_toolbar = ttk.Frame(affixes)
         affix_toolbar.pack(fill="x", pady=(0, 10))
@@ -2051,6 +2118,31 @@ class Monitor(tk.Tk):
         self.charset_custom_frame.grid() if custom else self.charset_custom_frame.grid_remove()
         self.charset_unicode_frame.grid() if unicode else self.charset_unicode_frame.grid_remove()
 
+    def _import_flex_file(self, mode='lines'):
+        path = filedialog.askopenfilename(parent=self.editor, title='选择 UTF-8 字符集文件',
+            filetypes=[('文本文件', '*.txt'), ('所有文件', '*.*')])
+        if not path:
+            return
+        try:
+            from .flex import file_bytes
+            text = Path(path).read_text(encoding='utf-8-sig')
+            entries = text.splitlines() if mode == 'lines' else list(text.replace('\r', '').replace('\n', ''))
+            if not entries or not entries[0]:
+                raise ValueError('文件必须每行一个非空、等字节长度的单元')
+            cs = {'single_char_length': len(entries[0].encode('utf8')), 'file': str(Path(path).resolve()), 'file_format': mode}
+            file_bytes(cs)
+            families = json.loads(self.editor_vars['flex.character_sets'].get())
+            name = simpledialog.askstring('字符集族名字', '在格式中引用的名字：', initialvalue=Path(path).stem, parent=self.editor)
+            if not name:
+                return
+            if name in families:
+                raise ValueError('该族名已存在，请使用新的名字')
+            families[name] = cs
+            self.editor_vars['flex.character_sets'].set(json.dumps(families, ensure_ascii=False, indent=2))
+            self.flex_enabled_var.set(True)
+        except Exception as exc:
+            messagebox.showerror('无法导入字符集', str(exc), parent=self.editor)
+
     def _editor_config(self) -> dict:
         """把编辑器界面上的所有输入汇总成一份完整配置（不落盘）。
 
@@ -2130,6 +2222,16 @@ class Monitor(tk.Tk):
         cfg["output"]["output_xp"] = self.editor_choice_maps["output.output_xp"][self.editor_vars["output.output_xp"].get()]
         cfg["output"]["log_output"] = int(self.editor_vars["output.log_output"].get())
         cfg["output"]["speed_output"] = int(self.editor_vars["output.speed_output"].get())
+        if getattr(self, 'flex_enabled_var', None) is not None:
+            if self.flex_enabled_var.get():
+                from .flex import normalize_config
+                cfg['character_sets'] = json.loads(self.editor_vars['flex.character_sets'].get())
+                cfg['format'] = json.loads(self.editor_vars['flex.format'].get())
+                cfg = normalize_config(cfg)
+                cfg.pop('character_set', None)
+            else:
+                cfg.pop('format', None)
+                cfg.pop('character_sets', None)
         return cfg
 
     def _effective_score_list(self, cfg: dict) -> str:
@@ -2248,6 +2350,9 @@ class Monitor(tk.Tk):
         scl = int(cs.get("single_char_length", 0) or 0)
         if scl < 1:
             return 0
+        if 'file' in cs:
+            from .flex import file_bytes
+            return len(file_bytes(cs)) // scl
         custom = cs.get("custom_values")
         if isinstance(custom, str):
             custom_bytes = custom.encode("utf-8")
@@ -2295,15 +2400,24 @@ class Monitor(tk.Tk):
         cs = cfg.get("character_set", {}) or {}
         scl = int(cs.get("single_char_length", 0) or 0)
         start = int(((en.get("ranges") or [{}])[0]).get("start", 0) or 0)
-        return {
+        summary = {
             "prefixes": len(cfg.get("prefixes", []) or []),
             "variable_length": en.get("variable_length", 0),
             "single_char_length": scl,
             "charset_size": self._charset_size(cs),
             "tested": start / 1e12,
         }
+        if 'format' in cfg:
+            from .flex import normalize_config
+            normalized = normalize_config(cfg)
+            families = cfg['character_sets']
+            summary['prefixes'] = len(normalized['prefixes'])
+            summary['variable_length'] = normalized['enumeration']['variable_length']
+            summary['single_char_length'] = '/'.join(str(cs['single_char_length']) for cs in families.values())
+            summary['charset_size'] = '/'.join(str(self._charset_size(cs)) for cs in families.values())
+        return summary
 
-    def _advance_config_start(self):
+    def _advance_config_start(self, *, final=True):
         """把配置里每个前缀区间的 ``start`` 推进到「续测起点 + 本次处理量」。
 
         语义（与「自动更新 start」复选框对应）：结束时把本次扫描过的量记进配置，
@@ -2327,16 +2441,32 @@ class Monitor(tk.Tk):
         """
         if self._run_start_updated:
             return
-        self._run_start_updated = True
         if not self.auto_start_var.get():
             return
         origin = self._run_origin
         path = self._run_config_path
         processed = self._run_processed
-        if not origin or not path or processed <= 0:
+        if not origin or not path or (processed <= 0 and 'format' not in origin):
             return
         try:
             cfg = copy.deepcopy(origin)
+            expected = getattr(self, '_run_last_saved_config', None)
+            if isinstance(expected, dict) and load_config(path) != expected:
+                raise ValueError('配置在运行中被修改，保留磁盘配置，请使用 Resume 恢复检查点')
+            if 'format' in cfg:
+                from .main import _try_resume
+                result_file = getattr(self, '_run_result_file', None)
+                if not result_file:
+                    return
+                resumed = _try_resume(cfg, result_file, out_dir=ROOT)
+                if resumed is None:
+                    return
+                save_config(path, resumed[0])
+                self._run_last_saved_config = copy.deepcopy(resumed[0])
+                if final:
+                    self._run_start_updated = True
+                self.status_var.set('已按各前缀连续完成检查点更新起点')
+                return
             ranges = cfg.get("enumeration", {}).get("ranges") or []
             if not ranges:
                 return
@@ -2347,10 +2477,29 @@ class Monitor(tk.Tk):
                 old = int(item.get("start", 0) or 0)
                 item["start"] = old + offset + processed
             save_config(path, cfg)
+            self._run_last_saved_config = copy.deepcopy(cfg)
+            if final:
+                self._run_start_updated = True
             self.status_var.set(f"已更新 {os.path.basename(path)} 的 start（→{base + processed}）")
         except Exception as exc:
             # 回写失败不能影响停止流程，只在状态栏提示
             self.status_var.set(f"更新 start 失败：{exc}")
+
+    def _save_session_progress(self):
+        """Session query may be cancelled: save without finalizing this run."""
+        if self.running:
+            self._advance_config_start(final=False)
+
+    def _periodic_progress_save(self):
+        """Every 30 seconds mirror a safe flex frontier into the selected config."""
+        now = time.monotonic()
+        if now < self._next_progress_save:
+            return
+        self._next_progress_save = now + 30
+        origin = self._run_origin or {}
+        # Only a contiguous checkpoint proves that advancing cannot skip holes.
+        if self.running and 'format' in origin and origin.get('enumeration', {}).get('mode') == 1:
+            self._advance_config_start(final=False)
 
     def _open_editor_for(self, path: str):
         """打开编辑器并载入指定配置文件（供配置选择器调用）。"""
@@ -2397,11 +2546,15 @@ class Monitor(tk.Tk):
         try:
             config_path = self._config_path()
             cfg = load_config(config_path)
+            self._run_last_saved_config = copy.deepcopy(cfg)
             _validate_config(cfg)
-            # Resume 仅支持枚举模式 1：位置由结果文件最后一条命中推出，不是精确检查点。
+            if 'format' in cfg and not cfg['enumeration'].get('prefix_ranges'):
+                cfg['enumeration']['ranges'][0]['end'] = int(self.range_var.get())
+            self._run_result_file = _resolve_result_file(self._selected_result_file())
+            # 格式顺序任务使用连续完成检查点；旧配置保留命中反推语义。
             if resume:
-                from .main import _resolve_result_file, _try_resume
-                resumed = _try_resume(cfg, _resolve_result_file(cfg["output"].get("result_file", "result.txt")))
+                from .main import _try_resume
+                resumed = _try_resume(cfg, self._run_result_file, out_dir=ROOT)
                 if resumed is not None:
                     cfg = resumed[0]
             # 记下本次运行的基准：起步时的 config 快照 + **实际**起步位置。
@@ -2442,7 +2595,7 @@ class Monitor(tk.Tk):
         self.start_threads_spinbox.configure(state="disabled")
         self.resume_checkbutton.configure(state="disabled")
         self.rebuild_checkbutton.configure(state="disabled")
-        # 运行中锁住：自动更新 start 是在"结束时"才回写的，跑到一半改它没有意义
+        # 运行中锁住本次的保存策略，多族顺序任务还会定期回写安全检查点。
         self.auto_start_checkbutton.configure(state="disabled")
         self._write_runtime_threads(self.runtime_thread_limit)
         self.start_button.configure(state="disabled")
@@ -2488,7 +2641,7 @@ class Monitor(tk.Tk):
             # 由 Python 侧解释（见 main._resolve_result_file）。原来这里直接传原值，
             # 于是把 "-" 当成文件名，在 out/ 下产生了一个名为 "-" 的文件。
             # 空值也交给它处理（会得到时间戳名），不再另写一套默认值。
-            result_file = _resolve_result_file(self._selected_result_file())
+            result_file = self._run_result_file
             params = engine_runner._build_params(task, charset_hex, result_file)
             if self.stop_requested:
                 self.events.put(("finished", "已停止"))
@@ -2629,6 +2782,7 @@ class Monitor(tk.Tk):
             self._refresh_boards()
             self.boards_dirty = False
             self.last_board_refresh = time.monotonic()
+        self._periodic_progress_save()
         # Never monopolize Tk's event loop when the engine writes progress fast.
         # 用 _schedule_after 记账，关闭时才能把这些待执行回调取消掉（见 _close）。
         self._schedule_after(50 if self.running else 150, self._drain_events)
@@ -2688,6 +2842,9 @@ class Monitor(tk.Tk):
         """
         for family, view in self.score_views.items():
             entries = self.boards.get(family, [])
+            button = self.score_copy_buttons.get(family)
+            if button is not None:
+                button.configure(state="normal" if entries else "disabled")
             limit = 5 if family in self.expanded_families else 1
             if limit == 1:
                 lines = [f"{score:>6}  {name}" for score, name in entries[:1]]
@@ -2696,6 +2853,8 @@ class Monitor(tk.Tk):
             while len(lines) < limit:
                 lines.append("-")
             if isinstance(view, tk.Text):
+                if view.get("1.0", "end-1c") == "\n".join(lines):
+                    continue
                 view.configure(state="normal")
                 view.delete("1.0", "end")
                 view.insert("1.0", "\n".join(lines))
@@ -2790,6 +2949,9 @@ class Monitor(tk.Tk):
            ``destroy()`` 释放窗口，才能干净退出。
         """
         self._closing = True
+        guard = getattr(self, '_session_guard', None)
+        if guard is not None:
+            guard.close()
         self._cancel_scheduled_after()
         # 关闭窗口也要把 start 推进（用户可能直接点 X 而不点「停止」）。
         # 这里在 _stop() 之前调用，因为 _stop() 里也会调一次；靠 _run_start_updated 去重。

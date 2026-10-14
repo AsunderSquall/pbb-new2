@@ -35,7 +35,8 @@ a = Analysis(
     # 显式声明 pbb 包内的子模块：入口 pbb/gui.py 里用的是延迟导入
     # （函数内部 import），静态分析不一定收集得到，漏掉就会在冻结后运行时才炸。
     hiddenimports=['pbb_core', 'yaml', 'pbb.ui', 'pbb.main', 'pbb.engine',
-                   'pbb.paths', 'pbb.build_settings', 'pbb.config_schema', 'pbb._build'],
+                   'pbb.paths', 'pbb.build_settings', 'pbb.config_schema', 'pbb._build',
+                   'pbb.flex', 'pbb.threading_config'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

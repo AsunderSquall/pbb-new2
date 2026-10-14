@@ -155,7 +155,7 @@ class ConfigLocationTests(unittest.TestCase):
         cfg = ui.load_config("config_football.yaml")
         # min_cqd>0 但 score_list 里没有 cqd：门控会失效，属被明确拒绝的配置。
         cfg["collection"]["min_cqd"] = 4000
-        cfg["collection"]["score_list"] = "qp,qd,cp,fp,wc,fs,pj"
+        cfg["collection"]["score_list"] = "qp,qd,pp,pd,cp,fp,wc,fs,pj"
         cfg["enumeration"]["mode"] = 4           # 绕开一一对应配对提示
         cfg["prefixes"] = [{"name": "A"}]
         cfg["suffixes"] = [{"name": "X"}]

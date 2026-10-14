@@ -18,6 +18,7 @@ import time
 from collections import Counter, defaultdict
 
 from . import build_settings, paths
+from .threading_config import resolve_threads
 
 # 仓库根：构建选项、源码树与二进制都以它为基准。定义收拢在 pbb/paths.py。
 ROOT = paths.REPO_ROOT
@@ -136,6 +137,9 @@ class Tuner:
         self.sources = {str(p.relative_to(self.snapshot)): digest(p) for p in self.snapshot.rglob('*') if p.is_file()}
         shutil.copy2(args.config, self.run/('config'+Path(args.config).suffix))
         self.task = _build_task_config(load_config(args.config))
+        configured_threads = self.task.get('n_threads', -1)
+        self.task['n_threads'] = resolve_threads(configured_threads)
+        print(f"Threads: {self.task['n_threads']} ({'automatic' if configured_threads == -1 else 'configured'}); fixed for all trials.", flush=True)
         build.ensure_core()
         pbb_core = engine._pbb_core()
         self.charset = engine._build_charset(self.task['character_set'])
@@ -331,11 +335,22 @@ class Tuner:
                          seed=SEEDS[mode%3], collect_mode=mode%3)
                 for family in FAMILIES:
                     t['min_'+family] = 1
+                # 编码矩阵仍验证指定的五种编码，不能被用户格式覆盖。
+                t.pop('format', None)
+                t.pop('character_sets', None)
                 tests.append((t, chars.encode().hex()))
         for length in (63,64,65,66):
             t = dict(self.task, scl=1, mode=1, prefixes=['+'], suffixes=['x'*(length-9)],
                      variable_len=7, range_L=999997, range_R=1000004, output_xp=1)
+            t.pop('format', None)
+            t.pop('character_sets', None)
             tests.append((t,b'0123456789'.hex()))
+        if 'format' in self.task:
+            # 另外对拍用户的真实位置布局；合成矩阵的非空要求仍然保留。
+            t = dict(self.task, mode=1, range_L=0, range_R=1000003, output_xp=1)
+            for family in FAMILIES:
+                t['min_'+family] = 1
+            tests.append((t,self.charset))
         return tests
 
     def verify(self, binary):

@@ -40,6 +40,7 @@
 #include <atomic>
 #include <algorithm>
 #include <unordered_map>
+#include <map>
 #include <cstdlib>
 #include <limits>
 #include <csignal>
@@ -228,6 +229,8 @@ static inline void ui_write_hex(FILE* f,const std::string& s){
 }
 #endif
 
+#include "flex_layout.hpp"
+
 inline int engine_main(int argc,char**argv){
     (void)argc;(void)argv;   // 不使用命令行参数: 全部配置走 stdin 的 key=value 协议
 
@@ -254,6 +257,15 @@ inline int engine_main(int argc,char**argv){
     int np=(int)prefixes.size(),ns=(int)suffixes.size();
     int mode=std::stoi(kv["mode"]),vlen=std::stoi(kv["variable_len"]);
     uint64_t rL=std::stoull(kv["range_L"]),rR=std::stoull(kv["range_R"]);
+    FlexLayout flex;
+    if (!flex.parse(kv)) { fprintf(stderr,"[engine] ERROR: invalid flex layout\n"); return 1; }
+    if (flex.enabled) {
+        for (const auto& p:prefixes) for (const auto& s:suffixes)
+            if (p.size()+flex.text.size()+s.size() >= 512) {
+                fprintf(stderr,"[engine] ERROR: flex name exceeds buffer\n"); return 1;
+            }
+        if (mode==1) { rR=std::min(rR,flex.total); rL=std::min(rL,rR); }
+    }
     // 逐族评分阈值 (MNAME 序): min_qp/min_qd/min_pp/min_pd/min_cqd/min_cp/min_fp/min_wc/min_fs/min_pj
     // <=0 视为该族不参与门控。
     // 注意: min_ 只决定「哪些族参与判定」, 不决定「算哪些族」—— 后者由 score_list 决定。
@@ -342,6 +354,10 @@ inline int engine_main(int argc,char**argv){
         }
         has_prefix_ranges = !prefix_L.empty();
     }
+    if (flex.enabled && mode==1) for(size_t i=0;i<prefix_L.size();++i) {
+        prefix_R[i]=std::min(prefix_R[i],flex.total);
+        prefix_L[i]=std::min(prefix_L[i],prefix_R[i]);
+    }
 
     // 打开输出文件
     // 结果文件路径固定为 out/<result_file>, 以追加方式打开 (因此 resume/续跑能续写同一文件)。
@@ -354,6 +370,47 @@ inline int engine_main(int argc,char**argv){
     FILE*fp_blue=nullptr;if(collect_mode>=1)fp_blue=fopen("out/blue.txt","a");  // mode 1/2 均收集
     FILE*flog=output_log?stderr:fopen("out/task_log.txt","a");
     FILE*fspeed=output_speed?stderr:fopen("out/speed_log.txt","a");
+    const bool checkpoint = flex.enabled && mode==1 && kv.count("flex_resume_id");
+    std::vector<uint64_t> resume_start(checkpoint?np:0), resume_frontier(checkpoint?np:0), resume_end(checkpoint?np:0);
+    std::vector<std::map<uint64_t,uint64_t>> resume_pending(checkpoint?np:0);
+    if(checkpoint)for(int i=0;i<np;++i){
+        resume_end[i]=has_prefix_ranges?prefix_R[i]:rR;
+        resume_start[i]=resume_frontier[i]=has_prefix_ranges?prefix_L[i]:rL;
+    }
+    if(checkpoint){
+        FILE* old=fopen((out_path+".resume").c_str(),"r");
+        if(old){
+            char id[128]={};
+            if(fgets(id,sizeof(id),old)){
+                id[strcspn(id,"\r\n")]=0;
+                if(kv["flex_resume_id"]==id)for(int i=0;i<np;++i){
+                    unsigned long long a,b,c;
+                    if(fscanf(old,"%llu %llu %llu",&a,&b,&c)!=3)break;
+                    if(a<=b && b==resume_frontier[i] && resume_end[i]<=c)resume_start[i]=a;
+                }
+            }
+            fclose(old);
+        }
+    }
+    auto save_checkpoint=[&](){
+        if(!checkpoint)return;
+        // 输出先落到流，再发布连续完成位置。失败保留旧检查点，最多重复计算。
+        if(ferror(fp) || fflush(fp)!=0 || (fp_blue && (ferror(fp_blue) || fflush(fp_blue)!=0)))return;
+        std::string target=out_path+".resume", temp=target+".tmp";
+        FILE* f=fopen(temp.c_str(),"w");if(!f)return;
+        fprintf(f,"%s\n",kv["flex_resume_id"].c_str());
+        for(int i=0;i<np;++i)fprintf(f,"%llu %llu %llu\n",
+            (unsigned long long)resume_start[i],(unsigned long long)resume_frontier[i],(unsigned long long)resume_end[i]);
+        bool ok=!ferror(f);if(fclose(f)!=0)ok=false;
+        if(ok){
+#if defined(_WIN32)
+            MoveFileExA(temp.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+#else
+            std::rename(temp.c_str(),target.c_str());
+#endif
+        }
+    };
+    save_checkpoint();
     fprintf(flog,"[engine] SIMD: %s\n",PBB_SIMD_NAME);fflush(flog);
     DBG("files opened, n_threads=%d mode=%d range=[%llu,%llu)",
         n_threads,mode,(unsigned long long)rL,(unsigned long long)rR);
@@ -432,7 +489,7 @@ inline int engine_main(int argc,char**argv){
     //   (再被配置的 vlen 封顶)。random_range_max = clen^varlen_task, 是随机区间的取模上界。
     // 目的: 让随机模式每个 chunk 也能顺序走满 100 万候选, 而不是逐个随机生成。
     int varlen_task=vlen;uint64_t random_range_max=1;
-    if(mode>=2){varlen_task=0;uint64_t x=1;while(x<CHUNK_SIZE){varlen_task++;x*=clen;}if(varlen_task>vlen)varlen_task=vlen;random_range_max=x;}
+    if(mode>=2 && !flex.enabled){varlen_task=0;uint64_t x=1;while(x<CHUNK_SIZE){varlen_task++;x*=clen;}if(varlen_task>vlen)varlen_task=vlen;random_range_max=x;}
 
     // 预分配 mex_vis (预计 task 数, 留 20% 余量)
     // mode 1 (无 per-prefix ranges): 每个 prefix 跑完整区间 → 总 task = range_chunks × np
@@ -598,14 +655,9 @@ inline int engine_main(int argc,char**argv){
                 }
 #endif
             }
-            bool keep=true;
             // any_gate=false (没有任何参与族) 时 keep 恒为 true: 此时引擎退化成「只做初筛,
             //   所有过筛名字全部记录」, 用于统计与调试。
-            if(any_gate){keep=false;
-                for(int m=0;m<M_N;m++){if(!plan.comp[m])continue;
-                    if(min_[m]>0&&sc[m]>=min_[m]){keep=true;break;}          // 普通阈值已过
-                    if(ptt_[m]>0&&r.sc_max[m]>=ptt_[m]){keep=true;break;}    // 普通未过 → 查 ptt(score_max)
-                }}
+            const bool keep=score_output_keep(plan,r,any_gate);
             if(keep){std::lock_guard lk(out_mtx);local_found++;
                 // 输出格式: 名字@队伍名 [分数...]。分数列按 MNAME 序取「被计算 (plan.comp)」
                 //   的子集 —— 不是固定的 XP/XD 两列。output_xp=0 时只写名字与队伍。
@@ -800,6 +852,54 @@ inline int engine_main(int argc,char**argv){
             consume_rand(buf,nlen,name,epre,evar,L,R,rng);
         };
 
+        // 可变位置按各族基数进位；固定字节始终保留，尾批复用当前标量评分入口。
+        auto consume_flex=[&](char* buf,int nlen,int plen,uint64_t L,uint64_t R,std::mt19937_64& rng){
+            const size_t count=flex.slots.size();
+            std::vector<uint64_t> digits(count);
+            auto encode=[&](size_t pos,uint64_t digit){
+                const auto& slot=flex.slots[pos];
+                memcpy(buf+plen+slot.offset,slot.bytes.data()+digit*slot.width,slot.width);
+            };
+            const size_t first=mode==1?0:flex.low_begin;
+            if(mode!=1) for(size_t pos=0;pos<first;++pos) encode(pos,rng()%flex.slots[pos].radix());
+            if(mode==2||mode==4){L=rng()%flex.low_total;R=L+CHUNK_SIZE;}
+            auto seek=[&](uint64_t rank){
+                for(size_t pos=count;pos-->first;){
+                    auto radix=flex.slots[pos].radix();digits[pos]=rank%radix;rank/=radix;encode(pos,digits[pos]);
+                }
+            };
+            auto advance=[&]{
+                for(size_t pos=count;pos-->first;){
+                    auto radix=flex.slots[pos].radix();
+                    if(++digits[pos]<radix){encode(pos,digits[pos]);break;}
+                    digits[pos]=0;encode(pos,0);
+                }
+            };
+            seek(L);
+            // PRELEN=0 避免任意长固定片段溢出 KSA 前缀索引，不改变完整双轮 KSA。
+            for(auto& lane:names){lane.PRELEN=0;lane.load_prefix(buf,nlen);}
+            if(mode==3){
+                for(uint64_t i=L;i<R;++i){
+                    for(size_t pos=count;pos-->first;)encode(pos,rng()%flex.slots[pos].radix());
+                    process_one(buf,nlen,score_full(buf,nlen,name,&plan));
+                }
+                return;
+            }
+            uint64_t i=L;
+#if PBB_HAS_SIMD
+            char batch_buf[4][512];
+            const char* batch_names[4]={batch_buf[0],batch_buf[1],batch_buf[2],batch_buf[3]};
+            for(;R-i>=4;i+=4){
+                for(int lane=0;lane<4;++lane){memcpy(batch_buf[lane],buf,nlen+1);advance();}
+                Name::load_name_batch4(names,batch_names,nlen);
+                ScoreResult results[4];
+                score_full_loaded_batch4(batch_names,nlen,names,results,&plan);
+                for(int lane=0;lane<4;++lane)process_one(batch_buf[lane],nlen,results[lane]);
+            }
+#endif
+            for(;i<R;++i){process_one(buf,nlen,score_full(buf,nlen,name,&plan));if(i+1<R)advance();}
+        };
+
         while(true){
             // 父进程已消失: 不再取新任务, 让本线程干净退出 (手上这个 chunk 已算完)。
             if(pbb_stop_requested()) break;
@@ -820,19 +920,24 @@ inline int engine_main(int argc,char**argv){
             // prefix_id/suffix_id 是 1 基, 这里取模保证与列表长度对齐 (producer 已保证不越界,
             //   取模只是复用同一表达式的兜底)。
             const std::string&p=prefixes[(t.prefix_id-1)%np];const std::string&s=suffixes[(t.suffix_id-1)%ns];
-            int plen=(int)p.size(),slen=(int)s.size(),nlen=plen+vlen*scl+slen;
+            int plen=(int)p.size(),slen=(int)s.size();
+            int body_len=flex.enabled?(int)flex.text.size():vlen*scl;
+            int nlen=plen+body_len+slen;
 #if defined(PBB_ENCODING_COPY) && PBB_ENCODING_COPY
             char buf[512]{};
 #else
             char buf[512];
 #endif
-            memcpy(buf,p.data(),plen);memset(buf+plen,0,vlen*scl);
-            if(slen)memcpy(buf+plen+vlen*scl,s.data(),slen);
+            memcpy(buf,p.data(),plen);
+            if(flex.enabled)memcpy(buf+plen,flex.text.data(),body_len);
+            else memset(buf+plen,0,body_len);
+            if(slen)memcpy(buf+plen+body_len,s.data(),slen);
             buf[nlen]=0;  // 修复: load_prefix/load_name 循环第一轮读 name[nlen], 与 pbb_all.cpp 全局零初始化对齐
             uint64_t L=t.L,R=t.R;
 
             // 模式分发: 各模式独立的编码逻辑
-            if(mode==1)      consume_mode1(buf,nlen,name,plen,vlen,L,R);
+            if(flex.enabled) consume_flex(buf,nlen,plen,L,R,rng);
+            else if(mode==1) consume_mode1(buf,nlen,name,plen,vlen,L,R);
             else if(mode==3) consume_mode3(buf,nlen,name,plen,L,R,rng);
             else             consume_mode24(buf,nlen,name,plen,L,R,rng);  // mode 2/4
 
@@ -843,6 +948,15 @@ inline int engine_main(int argc,char**argv){
             {
                 std::lock_guard lk(out_mtx);
                 total_found+=local_found;
+                if(checkpoint){
+                    int i=t.prefix_id-1;
+                    resume_pending[i][t.L]=t.R;
+                    auto &pending=resume_pending[i];
+                    while(!pending.empty() && pending.begin()->first==resume_frontier[i]){
+                        resume_frontier[i]=pending.begin()->second;pending.erase(pending.begin());
+                    }
+                    save_checkpoint();
+                }
                 if(local_max_sum>max_sum)max_sum=local_max_sum;
                 for(int m=0;m<M_N;m++)if(local_max_sc[m]>max_sc[m])max_sc[m]=local_max_sc[m];
 #if PBB_UI_ENGINE

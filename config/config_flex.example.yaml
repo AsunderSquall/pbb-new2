@@ -1,0 +1,53 @@
+# 字符串是固定内容；charset 引用占一个可变位置，可重复引用。
+team_name: 昀澤
+character_sets:
+  数字:
+    single_char_length: 1
+    types: [1]
+  汉字:
+    single_char_length: 3
+    types: [7]
+    custom_values: 春夏秋冬山河星月
+  词条:
+    single_char_length: 6
+    types: [1]
+    custom_values: 护球盘带过人射门
+format:
+  - "球员·"
+  - {charset: 汉字}
+  - {charset: 汉字}
+  - "-"
+  - {charset: 词条}
+  - {charset: 数字}
+  - {charset: 数字}
+prefixes: [{name: "+"}]
+suffixes: [{name: "+"}]
+enumeration:
+  mode: 1
+  ranges: [{start: 0, end: -1}]
+collection:
+  min_qp: 5400
+  min_qd: 6200
+  min_pp: 8000
+  min_pd: 8800
+  min_cqd: 4000
+  min_cp: 4100
+  min_fp: 4200
+  min_wc: 4000
+  min_fs: 3900
+  min_pj: 4100
+  ptt_cp: 4500
+  ptt_fp: 4600
+  ptt_wc: 4400
+  ptt_fs: 4300
+  ptt_pj: 4500
+  score_list: "qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj"
+  score_mode: all
+  collect_mode: 1
+output:
+  output_xp: 0
+  log_output: 1
+  speed_output: 1
+  result_file: flex.txt
+threads:
+  worker_threads: -1

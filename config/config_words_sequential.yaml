@@ -1,0 +1,70 @@
+debug_mode: 0
+team_name: 昀澤
+prefixes:
+- name: ''
+suffixes:
+- name: ''
+enumeration:
+  mode: 1
+  variable_length: 4
+  ranges:
+  - start: 0
+    end: -1
+  prefix_ranges:
+  - count: 1
+    start: 44931000000
+    end: 19178507248992
+collection:
+  min_qp: 5400
+  min_qd: 6200
+  min_pp: 8000
+  min_pd: 8800
+  min_cqd: 4000
+  min_cp: 4100
+  min_fp: 4200
+  min_wc: 4000
+  min_fs: 3900
+  min_pj: 4100
+  ptt_cp: 4500
+  ptt_fp: 4600
+  ptt_wc: 4400
+  ptt_fs: 4300
+  ptt_pj: 4500
+  score_list: qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj
+  score_mode: all
+  collect_mode: 1
+output:
+  output_xp: 0
+  log_output: 1
+  speed_output: 1
+  result_file: words_sequential.txt
+threads:
+  worker_threads: -1
+character_sets:
+  形容词:
+    single_char_length: 6
+    file: D:\namerena\files\pbb_new2_git\charsets\adjectives.txt
+    file_format: lines
+  名词:
+    single_char_length: 6
+    file: D:\namerena\files\pbb_new2_git\charsets\nouns.txt
+    file_format: lines
+  副词:
+    single_char_length: 6
+    file: D:\namerena\files\pbb_new2_git\charsets\adverbs.txt
+    file_format: lines
+  动词:
+    single_char_length: 6
+    file: D:\namerena\files\pbb_new2_git\charsets\verbs.txt
+    file_format: lines
+format:
+- charset: 形容词
+- 的
+- charset: 名词
+- charset: 副词
+- 地
+- charset: 动词
+character_set:
+  single_char_length: 1
+  types:
+  - 1

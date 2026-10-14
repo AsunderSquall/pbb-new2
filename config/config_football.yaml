@@ -18,6 +18,8 @@ enumeration:
 collection:
   min_qp: 5400
   min_qd: 6200
+  min_pp: 8000
+  min_pd: 8800
   min_cqd: 4000
   min_cp: 4100
   min_fp: 4200
@@ -29,7 +31,7 @@ collection:
   ptt_wc: 4400
   ptt_fs: 4300
   ptt_pj: 4500
-  score_list: "qp,qd,cqd,cp,fp,wc,fs,pj"
+  score_list: "qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj"
   score_mode: all
   collect_mode: 1
 output:
@@ -38,4 +40,4 @@ output:
   speed_output: 1
   result_file: football.txt
 threads:
-  worker_threads: 40
+  worker_threads: -1

@@ -18,6 +18,10 @@ bundle. Existing environment users only update pure; new full-feature users
 extract both ZIPs into the same parent directory, merging their PBB/ folders.
 runtime/, source/, config/ and PBBMonitor/ must be siblings. Users with a compiler
 are strongly encouraged to Rebuild once on their own machine for performance.
+The pure package also includes charsets/ beside config/. The supplied
+config_words_sequential.yaml references these four word lists with ../charsets/;
+keep both folders together. All bundled search configurations enable PP8000
+and PD8800, including the named-family examples.
 Install Python 3.10+, pybind11, PyYAML, and a C++17 compiler to rebuild:
 
 ```powershell

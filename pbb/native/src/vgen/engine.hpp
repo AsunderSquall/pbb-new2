@@ -284,6 +284,8 @@ static inline bool vgen_one(u64_t cseed, const ScorePlan& pl, bool need_sp2, boo
     if (xp[32] > 0.0 || x2[32] > 0.0) {
         double sh1, sh2;
         vg_shadow(sh_seed, sh1, sh2);
+        result.illusion_effective = xp[32];
+        result.shadow_strength = sh1;
         xp[43] = (xp[32] > 0.0) ? sh1 * xp[32] / 100.0 : 0.0;
         x2[43] = (x2[32] > 0.0) ? sh2 * x2[32] / 100.0 : 0.0;
         ptt_shadowi2 = sh2;
@@ -303,6 +305,8 @@ static inline bool vgen_one(u64_t cseed, const ScorePlan& pl, bool need_sp2, boo
     // ---- Step 6: 逐族评分 ----
     result.sum = V + 36 * 7;
     result.flag = true;
+    for (int k = 0; k < 16; ++k)
+        if (skill[k] == 24) result.illusion_freq = freq[k];
     sp_eval_plan(pl, xp, x2, fam_mask, result);
     result.xp = result.sc[M_QP];
     result.xd = result.sc[M_QD];
@@ -311,7 +315,7 @@ static inline bool vgen_one(u64_t cseed, const ScorePlan& pl, bool need_sp2, boo
     if (ptt_any) {
         bool any_normal_pass = false;
         for (int m = 0; m < M_N; m++) {
-            if (pl.comp[m] && pl.minv[m] > 0 && result.sc[m] >= pl.minv[m]) {
+            if (score_normal_pass(pl, result, m)) {
                 any_normal_pass = true; break;
             }
         }
@@ -442,15 +446,7 @@ inline int engine_main(int argc, char** argv) {
                 if (result.sum > l_max_sum) l_max_sum = result.sum;
                 if (result.xp > l_max_xp) l_max_xp = result.xp;
                 if (result.xd > l_max_xd) l_max_xd = result.xd;
-                bool keep = true;
-                if (any_gate) {
-                    keep = false;
-                    for (int m = 0; m < M_N; m++) {
-                        if (!plan.comp[m]) continue;
-                        if (min_[m] > 0 && sc[m] >= min_[m]) { keep = true; break; }
-                        if (ptt_[m] > 0 && result.sc_max[m] >= ptt_[m]) { keep = true; break; }
-                    }
-                }
+                bool keep = score_output_keep(plan, result, any_gate);
                 if (keep) {
                     std::lock_guard<std::mutex> lk(out_mtx);
                     local_found++;
