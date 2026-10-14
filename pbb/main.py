@@ -227,20 +227,24 @@ def _read_last_result(result_file: str, out_dir: str = ".") -> str | None:
         return None
 
 
-def _try_resume(cfg: dict, result_file: str) -> tuple[dict, str] | None:
+def _try_resume(cfg: dict, result_file: str, out_dir: str = '.') -> tuple[dict, str] | None:
     """尝试从已有结果文件断点续测.
 
     返回 (修改后的 cfg, 描述字符串) 或 None.
     不修改原始 cfg, 返回新的副本.
 
-    续测位置是「结果文件最后一条命中」反推出的编号，而不是已扫描候选的精确检查点：
-    两次命中之间被跳过的候选无法从结果文件恢复。因此只对 mode=1（顺序枚举）有意义，
-    随机模式没有单调的扫描位置，直接放弃。若结果文件不存在或为空，则从头全量开始。
+    格式配置使用每前缀连续完成检查点；旧配置保持结果文件最后命中反推的语义。
+    两种方式只对 mode=1 有意义，随机模式没有单调的扫描位置。
     """
+    from .flex import normalize_config
+    cfg = normalize_config(cfg)
     en = cfg["enumeration"]
     if en.get("mode") != 1:
         print("[resume] 仅支持 mode=1 (顺序枚举)", file=sys.stderr)
         return None
+
+    if 'format' in cfg:
+        return _resume_flex(cfg, result_file, out_dir)
 
     cs = cfg["character_set"]
     charset_entries, scl = _build_charset_entries(cs)
@@ -254,7 +258,7 @@ def _try_resume(cfg: dict, result_file: str) -> tuple[dict, str] | None:
     vlen = en.get("variable_length", 0)
 
     # 读最后一行
-    last_name = _read_last_result(result_file)
+    last_name = _read_last_result(result_file, out_dir) if out_dir != '.' else _read_last_result(result_file)
     if last_name is None:
         print("[resume] 结果文件不存在或为空, 全量开始", file=sys.stderr)
         return None
@@ -280,7 +284,7 @@ def _try_resume(cfg: dict, result_file: str) -> tuple[dict, str] | None:
             s = pr.get("start", 0)
             e = pr.get("end", int(1e18))
             if e == -1:
-                e = 0
+                e = 2**64 - 1
             for _ in range(cnt):
                 if idx >= n_pfx:
                     break
@@ -334,6 +338,42 @@ def _try_resume(cfg: dict, result_file: str) -> tuple[dict, str] | None:
     new_cfg["enumeration"]["mode"] = 1
 
     return new_cfg, desc
+
+
+def _resume_flex(cfg, result_file, out_dir='.'):
+    """只用连续完成检查点；旧结果文件不能证明多线程已完成的区间。"""
+    from pathlib import Path
+    from .flex import build_layout, resume_id
+    from .engine import _build_charset
+    import copy
+    task = _build_task_config(cfg)
+    template, slots = build_layout(task, _build_charset)
+    path = Path(out_dir) / 'out' / (result_file + '.resume')
+    if not path.exists():
+        print('[resume] 格式任务没有连续完成检查点，从配置起点重测（可能重复，不跳过候选）', file=sys.stderr)
+        return None
+    lines = path.read_text(encoding='ascii').splitlines()
+    if not lines or lines[0] != resume_id(task, template, slots):
+        raise ValueError('续测检查点与当前字符集、格式或计算配置不一致，请恢复原配置/文件或换用新的结果文件')
+    count = len(task['prefixes'])
+    if len(lines) != count + 1:
+        raise ValueError('续测检查点不完整')
+    starts = list(map(int, task.get('prefix_range_L', '').split(','))) if 'prefix_range_L' in task else [task['range_L']] * count
+    ends = list(map(int, task.get('prefix_range_R', '').split(','))) if 'prefix_range_R' in task else [task['range_R']] * count
+    total = min(2**64-1, __import__('math').prod(len(d)//w for _, w, d in slots))
+    ranges = []
+    for i, line in enumerate(lines[1:]):
+        original, frontier, limit = map(int, line.split())
+        end = min(total, 2**64-1 if ends[i] == -1 else ends[i])
+        start = min(starts[i], end)
+        if not 0 <= original <= frontier <= limit <= total or start < original or end > limit:
+            raise ValueError('续测区间超出检查点覆盖范围，请使用原区间或其子区间')
+        ranges.append({'count': 1, 'start': min(end, max(start, frontier)), 'end': end})
+    result = copy.deepcopy(cfg)
+    result['enumeration']['prefix_ranges'] = ranges
+    desc = '按各前缀连续完成检查点续测；未完成的块重新计算'
+    print('[resume] ' + desc, file=sys.stderr)
+    return result, desc
 
 
 def _resolve_result_file(raw: str) -> str:
@@ -395,6 +435,11 @@ def _validate_config(cfg: dict):
 
     使用 CONFIG_MAP 中的 config_path 读取值，发现命名不一致时直接报错。
     """
+    from .flex import normalize_config
+    try:
+        cfg = normalize_config(cfg)
+    except ValueError as exc:
+        _die(str(exc))
     # ── debug_mode ──
     dm = _read_cfg(cfg, "debug_mode")
     if dm not in (0, 1):
@@ -488,6 +533,8 @@ def _validate_config(cfg: dict):
                 pass
             elif end == -1:
                 pass  # 几乎无限 — engine 层会展开
+            elif end == start and 'format' in cfg and mode == 1:
+                pass  # 格式检查点完成的有限区间保留 end，不丢失覆盖边界。
             elif end <= start:
                 _die(f"enumeration.prefix_ranges[{i}].end 必须 > start (或 0=跳过, -1=无限), 当前: end={end} start={start}")
             total_cnt += cnt
@@ -595,6 +642,8 @@ def _build_task_config(cfg: dict) -> dict:
     新增字段只需在 CONFIG_MAP 加一行，此函数自动包含。
     特殊字段 (character_set/prefixes/suffixes/ranges) 手工补充。
     """
+    from .flex import normalize_config
+    cfg = normalize_config(cfg)
     en = cfg["enumeration"]
     cl = cfg["collection"]
     out_cfg = cfg["output"]
@@ -610,6 +659,17 @@ def _build_task_config(cfg: dict) -> dict:
     tc["prefixes"] = [p["name"] for p in cfg["prefixes"]]
     tc["suffixes"] = [s["name"] for s in cfg["suffixes"]]
     tc["scl"] = cfg["character_set"]["single_char_length"]
+    if 'format' in cfg:
+        tc['format'] = cfg['format']
+        import copy
+        from .flex import file_bytes
+        tc['character_sets'] = copy.deepcopy(cfg['character_sets'])
+        for name, cs in tc['character_sets'].items():
+            if 'file' in cs:
+                width = cs['single_char_length']
+                tc['character_sets'][name] = {'single_char_length': width,
+                    'types': [{1:4, 2:7, 3:7, 4:2}.get(width, 1)],
+                    'custom_values': list(file_bytes(cs))}
     tc["range_L"] = rng.get("start", 0)
     tc["range_R"] = rng.get("end", int(1e18))
 
@@ -713,6 +773,8 @@ def main():
         with open(config_path, encoding="utf-8") as f: cfg = json.load(f)
 
     # ── 3.5 配置合法性校验 ──
+    from .flex import resolve_files
+    cfg = resolve_files(cfg, config_path)
     _validate_config(cfg)
 
     # ── 3.6 断点续测 (--resume) ──
@@ -721,7 +783,11 @@ def main():
     if args.resume:
         rf_raw = cfg.get("output", {}).get("result_file", "result.txt")
         rf = _resolve_result_file(rf_raw)
-        resumed = _try_resume(cfg, rf)
+        try:
+            resumed = _try_resume(cfg, rf)
+        except ValueError as exc:
+            print(f'[resume] ERROR: {exc}', file=sys.stderr)
+            sys.exit(1)
         if resumed is not None:
             new_cfg, resume_desc = resumed
             # 写临时 YAML 配置文件 (保留原始 config)
@@ -742,6 +808,9 @@ def main():
 
     # ── 4. 组装引擎配置 (CONFIG_MAP 驱动 + CLI 覆盖) ──
     task_config = _build_task_config(cfg)
+    if 'format' in task_config and any(value is not None for value in
+                                      (args.vlen, args.scl, args.types, args.custom_values)):
+        _die('格式配置的位置与字符集由 format/character_sets 定义，不能用 --vlen/--scl/--types/--custom-values 覆盖')
 
     # -1 = 几乎无限 (uint64_t max ≈ 1.8×10^19)
     if task_config["range_R"] == -1:
@@ -783,9 +852,8 @@ def main():
             task_config["character_set"]["custom_values"] = val
 
     # ── 5. 执行 ──
-    n = task_config.get("n_threads", -1)
-    if n == -1:
-        n = os.cpu_count() or 4
+    from .threading_config import resolve_threads
+    n = resolve_threads(task_config.get("n_threads", -1))
     task_config["n_threads"] = n
 
     # 解析输出文件名: 配置文件 → CLI 覆盖

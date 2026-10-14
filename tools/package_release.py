@@ -33,7 +33,8 @@ ROOT = paths.REPO_ROOT
 
 DIST_DIR = "dist_releases/" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 CONFIG_NAMES = {'build_config.json', 'config.yaml', 'config.json', 'config.toml',
-                'config_football.yaml', 'config.example.yaml', 'config.example.json', 'config.example.toml'}
+                'config_football.yaml', 'config.example.yaml', 'config.example.json', 'config.example.toml',
+                'config_flex.example.yaml'}
 
 # 文档目录：AUTOTUNE.md、PACKAGING.md 等开发/打包说明放在这里。
 DOCS_DIR = "docs"
@@ -169,11 +170,12 @@ def source_paths():
              + list(Path("fonts").rglob("*")) + list(Path("offline").rglob("*")))
     paths += [Path(name) for name in (
         # 顶层薄启动器与文档。
-        "main.py", "ui.py", "README.md", "PACKAGING.md", "docs/AUTOTUNE.md",
+        "main.py", "ui.py", "README.md", "PACKAGING.md", "docs/AUTOTUNE.md", "docs/FLEX.md",
         # 测试：离线包验证会跑整套。
         "tests/test_autotune.py", "tests/test_build.py", "tests/test_build_settings.py",
         "tests/test_config_location.py", "tests/test_docstring_coverage.py",
-        "tests/test_ui_affixes.py", "tests/test_ui_drag.py", "tests/test_ui_engine.py",
+        "tests/test_ui_affixes.py", "tests/test_ui_drag.py", "tests/test_ui_engine.py", "tests/test_flex.py",
+        "tests/test_qp_filter.py", "tests/native_qp_filter.cpp", "tests/test_threading_config.py",
         # 发布包内的自动测速入口与开发入口。
         "tune_quick.bat", "tune_full.bat", "run.bat", "run.sh", "run_ui.bat",
         # 配置模板（发布包 config/ 由 distribution_configs() 统一生成，这里只在源码目录留示例）。

@@ -142,6 +142,11 @@ _ENGINE_KEYS_COMPUTED = {
     "prefix_range_R",
     # 可选 seed
     "seed",
+    "flex_template",
+    "flex_offsets",
+    "flex_widths",
+    "flex_charsets",
+    "flex_resume_id",
 }
 
 # 所有合法 engine 键名 = CONFIG_MAP 内 + Python 计算

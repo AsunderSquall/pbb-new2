@@ -145,6 +145,7 @@ README.pdf
 !config/config.example.yaml
 !config/config.example.json
 !config/config.example.toml
+!config/config_flex.example.yaml
 
 # 放行：生产门控配置
 #   pbb/ui.py 在没有 config.yaml 时回退到 config/config_football.yaml，

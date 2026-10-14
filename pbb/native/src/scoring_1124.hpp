@@ -107,8 +107,38 @@ struct ScoreResult {
   int freqs[16];    // 16 个槽的技能频次
   int flag3;        // 未使用 (保留接口兼容)
   int shadow;       // 未使用
-  bool flag;        // 始终 true (此路径不过滤)
+  bool flag;        // 是否通过原有属性、技能门控。
+  int illusion_freq; // 原始幻术熟练度；必须在暗影加载覆盖 skill/freq 前保存。
+  int qp_reference_pp; // 已展开的完整 PP，供离线诊断复用；不额外计算。
+  int qp_reference_qp; // 已展开的完整 QP，供离线诊断复用；不额外计算。
+  double illusion_effective; // SP1 x32：叠加衰减后的模型有效幻术熟练度。
+  double shadow_strength; // SP1 幻影属性加权强度 s，不乘幻术熟练度。
+  double qp_deduction; // QP二次修正扣分；不影响其他族。
 };
+
+// 合并实际QP数据、按名字分组打乱80/20后拟合。使用SP1有效幻术u及幻影强度s。
+// 没有u=60或s=396.43的硬切换；u=0不扣分，负修正夹到0不加分。
+inline double qp_shadow_deduction(double u, double s) {
+  if (u <= 0.0) return 0.0;
+  const double f = (0.0001942206736111687 * s - 0.24932235019037452) * s
+                 + 82.48156669219784;
+  const double deduction = u * f;
+  return deduction > 0.0 ? deduction : 0.0;
+}
+
+inline bool score_normal_pass(const ScorePlan& pl, const ScoreResult& r, int m) {
+  return pl.comp[m] && pl.minv[m] > 0 && r.sc[m] >= pl.minv[m];
+}
+
+inline bool score_output_keep(const ScorePlan& pl, const ScoreResult& r, bool any_gate) {
+  if (!r.flag) return false;
+  if (!any_gate) return true;
+  for (int m = 0; m < M_N; ++m) if (pl.comp[m]) {
+    if (score_normal_pass(pl, r, m)) return true;
+    if (pl.pttv[m] > 0 && r.sc_max[m] >= pl.pttv[m]) return true;
+  }
+  return false;
+}
 
 // ===== PolyEntry1124: 多项式特征预计算索引表 =====
 // 每项 3 字节: is_pair=0 表示一阶项 x[p]; is_pair=1 表示二阶项 x[p]*x[q]。
@@ -579,15 +609,27 @@ inline void sp_eval_plan(const ScorePlan &pl, const double *xp_x, const double *
     const int m = pl.order[oi];
     if (!((fam_mask >> m) & 1u)) continue;   // 未过族一阶预筛 (或未列入计划) 的族不展开
     switch (m) {
-      case M_QP: case M_QD: {
-        const float *W = (m == M_QP) ? MODEL_QP0 : MODEL_QD0;
+      case M_QP: {
+        const double* a = get1();
+        float s = MODEL_QP0[0];
+        for (int i = 0; i < 1123; ++i) s += a[i] * MODEL_QP0[i + 1];
+        result.qp_reference_qp = (int)s; // 保留原模型整数分，供离线对照。
+        const double u = xp_x[32];
+        const double strength = u > 0.0 ? xp_x[43] * 100.0 / u : 0.0;
+        result.qp_deduction = qp_shadow_deduction(u, strength);
+        // 先保留原QP截断口径，再减浮点扣分并截断；不新增负分夹取规则。
+        sc[m] = (int)(result.qp_reference_qp - result.qp_deduction);
+        break;
+      }
+      case M_QD: {
+        const float *W = MODEL_QD0;
         const double *a = get1();
         float s = W[0];
         for (int i = 0; i < 1123; i++) s += a[i] * W[i + 1];
         sc[m] = (int)s;
         break;
       }
-      case M_PP: sc[m] = C(dot_1124_f(get1(), MODEL_PP0)); break;
+      case M_PP: sc[m] = result.qp_reference_pp = C(dot_1124_f(get1(), MODEL_PP0)); break;
       case M_PD: sc[m] = C(dot_1124_f(get1(), MODEL_PD0)); break;
       case M_CQD: {
         const double *a = get1();
@@ -622,7 +664,7 @@ inline void sp_eval_plan(const ScorePlan &pl, const double *xp_x, const double *
       case M_PJ: sc[m] = C(dot_1124_f(get2(), MODEL_PJ0)); break;
       default: break;
     }
-    if (pl.any_mode && pl.minv[m] > 0 && sc[m] >= pl.minv[m]) break;
+    if (pl.any_mode && score_normal_pass(pl, result, m)) break;
   }
 }
 
@@ -1258,6 +1300,11 @@ inline ScoreResult score_full(const char* name, int name_len, Name& name_obj,
 
   // ---- Step 3: 技能分布 ----
   name_obj.calc_skills(name);
+  for (int k = 0; k < 16; ++k) {
+    result.skills[k] = name_obj.skill[k];
+    result.freqs[k] = name_obj.freq[k];
+    if (name_obj.skill[k] == 24) result.illusion_freq = name_obj.freq[k];
+  }
 
   // ---- Step 3b: ptt 预处理 (仅当计划含启用 ptt 的族) ----
   // calc_skills 刚以 simd_skill_filter 从头重写 name_base[0..127] 为原始序列,
@@ -1357,6 +1404,8 @@ inline ScoreResult score_full(const char* name, int name_len, Name& name_obj,
     double shadowi = sprop[0]*2.8 + sprop[1]*0.6 + sprop[2]*2.5
                    + sprop[3]*1.2 + sprop[4]*1.0 + sprop[5]*1.0
                    - sprop[6]*1.2 + sprop[7]*0.8;
+    result.illusion_effective = xp_x[32];
+    result.shadow_strength = shadowi;
     double shadowi2 = sprop[0]*2.2 + sprop[1]*0.75 + sprop[2]*1.9
                     + sprop[3]*1.3 + sprop[4]*0.6 + sprop[5]*1.2
                     - sprop[6]*1.8 + sprop[7]*1.0;
@@ -1408,7 +1457,7 @@ inline ScoreResult score_full(const char* name, int name_len, Name& name_obj,
   if (ptt_any) {
     bool any_normal_pass = false;
     for (int m = 0; m < M_N; m++) {
-      if (pl.comp[m] && pl.minv[m] > 0 && result.sc[m] >= pl.minv[m]) {
+      if (score_normal_pass(pl, result, m)) {
         any_normal_pass = true;
         break;
       }
@@ -1473,6 +1522,9 @@ inline void score_full_loaded_batch4(const char* const names[4], int name_len,
   if (!active) return;
 
   Name::calc_skills_batch4(objs, active);
+  for (int lane = 0; lane < 4; ++lane) if (active & (1u << lane))
+    for (int k = 0; k < 16; ++k)
+      if (objs[lane].skill[k] == 24) results[lane].illusion_freq = objs[lane].freq[k];
   // ---- ptt 预处理: 保存原始 name_base + last/freq14/freq15 (必须在 nb[0..30] 还原之前) ----
   bool ptt_any = false;
   for (int m = 0; m < M_N; m++) if (pl.comp[m] && pl.pttv[m] > 0) { ptt_any = true; break; }
@@ -1589,6 +1641,8 @@ inline void score_full_loaded_batch4(const char* const names[4], int name_len,
     double shadowi = sprop[0]*2.8 + sprop[1]*0.6 + sprop[2]*2.5
                    + sprop[3]*1.2 + sprop[4]*1.0 + sprop[5]*1.0
                    - sprop[6]*1.2 + sprop[7]*0.8;
+    results[lane].illusion_effective = x[lane][32];
+    results[lane].shadow_strength = shadowi;
     double shadowi2 = sprop[0]*2.2 + sprop[1]*0.75 + sprop[2]*1.9
                     + sprop[3]*1.3 + sprop[4]*0.6 + sprop[5]*1.2
                     - sprop[6]*1.8 + sprop[7]*1.0;
@@ -1640,7 +1694,7 @@ inline void score_full_loaded_batch4(const char* const names[4], int name_len,
     for (int lane = 0; lane < 4; lane++) if (active & (1u << lane)) {
       bool any_normal_pass = false;
       for (int m = 0; m < M_N; m++) {
-        if (pl.comp[m] && pl.minv[m] > 0 && results[lane].sc[m] >= pl.minv[m]) {
+        if (score_normal_pass(pl, results[lane], m)) {
           any_normal_pass = true;
           break;
         }

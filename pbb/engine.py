@@ -9,6 +9,7 @@ import os, sys, time, tempfile, subprocess, signal
 
 from . import paths
 from .config_schema import engine_default, ALL_ENGINE_KEYS
+from .threading_config import resolve_threads
 
 
 def _pbb_core():
@@ -61,6 +62,9 @@ def _build_charset(cs: dict) -> str:
       >=5 字节: 1 自定义 / 2 Unicode 区间（足球配置用 6 字节单元）
     同一 scl 下多个类型会被依次拼接，不自动去重（README.md 有说明）。
     """
+    if 'file' in cs:
+        from .flex import file_bytes
+        return file_bytes(cs).hex()
     pbb_core = _pbb_core()
     scl = cs["single_char_length"]
     buf = bytearray()
@@ -194,7 +198,7 @@ def _build_params(config: dict, charset_hex: str, result_file: str = "result.txt
 
     params = (
         f"team_name={config['team_name']}\n"
-        f"n_threads={config.get('n_threads', _dv('n_threads'))}\n"
+        f"n_threads={resolve_threads(config.get('n_threads', _dv('n_threads')))}\n"
         f"scl={scl}\ncharset_len={charset_len}\ncharset_bytes={charset_hex}\n"
         f"prefixes={pfx}\nsuffixes={sfx}\n"
         f"mode={config['mode']}\nvariable_len={config['variable_len']}\n"
@@ -241,6 +245,17 @@ def _build_params(config: dict, charset_hex: str, result_file: str = "result.txt
             f"c_hp398_min={config.get('c_hp398_min', _dv('c_hp398_min'))}\n"
         )
 
+    if 'format' in config:
+        from .flex import build_layout
+        template, slots = build_layout(config, _build_charset)
+        if config['mode'] == 1:
+            from .flex import resume_id
+            params += f'flex_resume_id={resume_id(config, template, slots)}\n'
+        params += f'flex_template={template.hex()}\n'
+        params += 'flex_offsets=' + ','.join(str(s[0]) for s in slots) + '\n'
+        params += 'flex_widths=' + ','.join(str(s[1]) for s in slots) + '\n'
+        params += 'flex_charsets=' + ','.join(s[2].hex() for s in slots) + '\n'
+
     # 自检: 所有生成的 engine key 必须在 ALL_ENGINE_KEYS 中注册
     # (仅 debug_mode 开启时检查，避免影响性能)
     if config.get("debug_mode"):
@@ -276,10 +291,7 @@ def run(config: dict, engine_bin: str = None, out_dir: str = None,
         charset_hex = _build_charset(config["character_set"])
 
     # 线程数
-    n_threads = config.get("n_threads", -1)
-    if n_threads == -1:
-        n_threads = os.cpu_count() or 4
-    config["n_threads"] = n_threads
+    config["n_threads"] = resolve_threads(config.get("n_threads", -1))
 
     params = _build_params(config, charset_hex, result_file)
 
