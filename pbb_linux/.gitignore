@@ -1,0 +1,7 @@
+# Local Linux runtime and generated build outputs
+runtime/
+source/build/
+source/out/
+source/__pycache__/
+source/**/*.pyc
+*.pyc

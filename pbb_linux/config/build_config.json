@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "tested": false,
+  "status": "none",
+  "options": {
+    "lto": true,
+    "ksa": true,
+    "attr": true,
+    "copy": true,
+    "unroll": true,
+    "avx2": false,
+    "filter": 0,
+    "prefer256": false
+  },
+  "machine": null,
+  "compiler": null,
+  "source_hashes": {},
+  "result": null
+}

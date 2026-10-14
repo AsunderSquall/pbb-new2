@@ -1,0 +1,130 @@
+{
+  "_comment": "======== PBB 名字评分测号器 — JSON 配置示例 ========",
+  "_comment_usage": "用法: python3 main.py -c test-config.json",
+  "_comment_threads": "或: python3 main.py -c test-config.json --threads 8",
+
+  "debug_mode": 0,
+  "_comment_debug_mode": "debug 诊断输出: 0=关闭 1=开启 (引擎逐步输出 checkpoint 到 stderr)",
+
+  "team_name": "test",
+  "_comment_team_name": "队伍名, 任意 UTF-8 字符串 (输入 '@' 使用自定义编码)",
+
+  "prefixes": [
+    {
+      "name": "test-",
+      "_comment": "前缀内容, '+' 表示无前缀"
+    }
+  ],
+  "_comment_prefixes": "前缀列表。mode 1: 每个 prefix 遍历完整 range(名数=prefix数×range); mode 2/3/4: 每个 chunk 随机选一个 prefix(只扩大随机池, 不翻倍)",
+
+  "suffixes": [
+    {
+      "name": "+",
+      "_comment": "后缀内容, '+' 表示无后缀"
+    }
+  ],
+  "_comment_suffixes": "每个后缀与每个前缀配对枚举",
+
+  "character_set": {
+    "_comment": "──────── 字符集配置 ────────",
+    "single_char_length": 4,
+    "_comment_length": "单字符字节数: 1=单字节 2=双字节 3=三字节 4=四字节",
+
+    "types": [2],
+    "_comment_types": "字符集类型, 按字节数选择:",
+    "_comment_types_1byte": "  1字节: 1=数字 2=小写字母 3=大写字母 4=自定义编码 5=ASCII",
+    "_comment_types_2byte": "  2字节: 1=小写希腊 2=大写希腊 3=小写俄文 4=大写俄文 5=小写拉丁 6=大写拉丁 7=自定义 8=Unicode区间",
+    "_comment_types_3byte": "  3字节: 1=全部汉字 2=常用汉字 3=平假名 4=片假名 5=盲文 6=扩展汉字 7=自定义 8=Unicode区间",
+    "_comment_types_4byte": "  4字节: 1=扩展汉字 2=自定义 3=Unicode区间",
+
+    "custom_values": "🐒🐵🐊🦎🐍🐛🙈🙉🙊🐉",
+    "_comment_custom": "自定义字符 (字符串; scl=3 用中文, scl=4 用 emoji; 兼容旧格式数字列表)",
+
+    "unicode_ranges": [],
+    "_comment_unicode": "Unicode 区间 (type=Unicode时使用): [{\"start\": 128, \"end\": 2047}]",
+
+    "output_charset": 1,
+    "_comment_output_charset": "[已废弃] 引擎忽略"
+  },
+
+  "enumeration": {
+    "_comment": "──────── 枚举配置 ────────",
+    "mode": 1,
+    "_comment_mode": "枚举模式: 1=顺序 2=随机(区间) 3=随机(逐位) 4=随机(区间+配对)",
+      "_comment_mode_random": "mode 2/3/4: range 控总次数(chunks×1M), 随机范围=charset_len^vlen(自动), range.end 越大采样越多",
+
+    "variable_length": 8,
+    "_comment_variable": "可变字符数: 名字中间枚举部分的字符个数",
+
+    "ranges": [
+      {
+        "start": 0,
+        "end": 100000000,
+        "_comment": "end=-1 → 几乎无限(1.8×10^19); mode 1=枚举区间; mode 2/3/4: chunk数=(end-start)/1M"
+      }
+    ],
+    "_comment_ranges": "多个前缀共享此区间, end 必须为有限值"
+  },
+
+  "collection": {
+    "_comment": "──────── 收集阈值 ────────",
+    "min_qp": 5400,
+    "_comment_xp": "虚评最低阈值",
+
+    "min_qd": 6200,
+    "min_cqd": 4000,
+    "_comment_xd": "虚单最低阈值 (与虚评为或关系)",
+
+    "min_cp": 4100,
+    "min_fp": 4200,
+    "min_wc": 4000,
+    "min_fs": 3900,
+    "min_pj": 4100,
+    "_comment_min_others": "其余各族最低阈值 (未列出 = 0 = 不门控)",
+
+    "ptt_cp": 4500,
+    "ptt_fp": 4600,
+    "ptt_wc": 4400,
+    "ptt_fs": 4300,
+    "ptt_pj": 4500,
+    "_comment_ptt": "SP2 族潜在值(potential)阈值: base 换成 63 后该族能达到的理论最高分",
+
+    "score_list": "qp,qd,cqd,cp,fp,wc,fs,pj",
+    "_comment_score_list": "要计算哪些评分族(逗号分隔或列表); 留空=全部 10 族, 可选: qp qd pp pd cqd cp fp wc fs(别名 rh) pj",
+
+    "score_mode": "all",
+    "_comment_score_mode": "all=全部算完; any=按 score_list 顺序, 遇首个达标族即停止后续计算",
+
+    "collect_mode": 1,
+    "_comment_collect": "特殊属性号收集: 0=否 1=破纪录号(out/blue.txt) 2=自定义阈值",
+
+    "special_thresholds": {
+      "_comment": "collect_mode=2 时生效",
+      "eight_v_min": 777,
+      "seven_v_min": 700,
+      "hl_min": 93,
+      "hp398_eight_v_min": 741
+    }
+  },
+
+  "output": {
+    "_comment": "──────── 输出配置 ────────",
+    "output_xp": 1,
+    "_comment_output_xp": "输出文件是否包含虚评虚单分数: 0=否 1=是",
+
+    "log_output": 1,
+    "_comment_log": "任务日志输出: 0=文件(out/task_log.txt) 1=屏幕",
+
+    "speed_output": 1,
+    "_comment_speed": "速度信息输出: 0=文件(out/speed_log.txt) 1=屏幕",
+
+    "result_file": "-",
+    "_comment_result": "输出文件名: + =随机名, - =时间戳, 其他 =自定义 (自动加 out/ 前缀)"
+  },
+
+  "threads": {
+    "_comment": "──────── 线程配置 ────────",
+    "worker_threads": -1,
+    "_comment_worker": "工作线程数: -1 =自动检测CPU核心数, 或指定 1/2/4/8 等"
+  }
+}

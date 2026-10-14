@@ -1,0 +1,54 @@
+debug_mode: 0
+team_name: lfemx
+
+prefixes:
+  - name: 'Marisa '
+  - name: 'Reimu '
+  - name: 'Sakuya '
+  - name: 'Patchouli '
+  - name: 'Alice '
+  - name: 'Remilia '
+  - name: 'Flandre '
+  - name: 'Youmu '
+  - name: 'Yuyuko '
+
+suffixes:
+  - name: '+'
+
+character_set:
+  single_char_length: 1
+  types: [1, 2, 3]
+
+enumeration:
+  mode: 2
+  variable_length: 12
+  ranges:
+    - start: 0
+      end: 18446744073709551615
+
+collection:
+  min_qp: 5400
+  min_qd: 6200
+  min_cqd: 4000
+  min_cp: 4100
+  min_fp: 4200
+  min_wc: 4000
+  min_fs: 3900
+  min_pj: 4100
+  ptt_cp: 4500
+  ptt_fp: 4600
+  ptt_wc: 4400
+  ptt_fs: 4300
+  ptt_pj: 4500
+  score_list: "qp,qd,cqd,cp,fp,wc,fs,pj"
+  score_mode: all
+  collect_mode: 1
+
+output:
+  output_xp: 0
+  log_output: 1
+  speed_output: 1
+  result_file: 'ps2.txt'
+
+threads:
+  worker_threads: 12
