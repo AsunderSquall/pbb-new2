@@ -53,4 +53,4 @@ output:
   result_file: 'ps2.txt'
 
 threads:
-  worker_threads: 12
+  worker_threads: -1

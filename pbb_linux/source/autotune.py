@@ -106,6 +106,20 @@ class Tuner:
         self.sources = {str(p.relative_to(self.snapshot)): digest(p) for p in self.snapshot.rglob('*') if p.is_file()}
         shutil.copy2(args.config, self.run/('config'+Path(args.config).suffix))
         self.task = _build_task_config(load_config(args.config))
+        # -1 = 自动：必须在这里解析成具体线程数再交给引擎。引擎按 n_threads 创建
+        # consumer，收到 -1 会一个都不创建；队列只有 4 个槽，producer 填满后永久阻塞，
+        # 整个任务卡死。CLI 在 main.py 里做同一件事，测速入口不能漏。
+        configured_threads = self.task.get('n_threads', -1)
+        available_cpus = os.cpu_count() or 4
+        if configured_threads == -1:
+            self.task['n_threads'] = available_cpus
+        print(f"Threads: {self.task['n_threads']} ({'automatic' if configured_threads == -1 else 'configured'}); "
+              f"fixed for all trials. Available logical CPUs: {available_cpus}.", flush=True)
+        if configured_threads != -1 and self.task['n_threads'] > available_cpus:
+            # 显式线程数按设计优先，只提示：从别的机器带过来的配置会把本机压到过载降频。
+            print(f"警告：配置显式指定 {self.task['n_threads']} 线程，但本机只有 "
+                  f"{available_cpus} 个可用逻辑CPU。本机可能过载降频，结果也不能与别的机器比较；"
+                  "若不是有意固定，请把 threads.worker_threads 改回 -1（自动）。", flush=True)
         build.ensure_core()
         sys.path.insert(0, str(ROOT/'build'))
         import pbb_core

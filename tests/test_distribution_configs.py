@@ -31,6 +31,28 @@ class DistributionConfigTests(unittest.TestCase):
                 checked+=1
         self.assertGreaterEqual(checked,6)
 
+    def test_bundled_configs_never_hardcode_a_machine_thread_count(self):
+        """随包配置的线程数必须是 -1（自动），不能带某一台机器的具体值。
+
+        7.0.0 的 config_football.yaml 写死过 worker_threads: 40，而发布的 config.yaml
+        正是由它生成 —— 于是所有用户都在用 40 线程，任何机器上都一样：核少的机器过载
+        降频，核多的机器用不满，测速数据也不可与别的机器比较。pbb_linux 的配置是从
+        那份文件复制的，同样必须保持 -1。这条用例把该回退钉住。
+        """
+        files=[ROOT/'config'/n for n in package_release.CONFIG_NAMES if n!='build_config.json']
+        linux=ROOT/'pbb_linux/config'
+        if linux.is_dir():
+            files.extend(p for p in linux.glob('config*') if p.suffix in ('.yaml','.json','.toml'))
+        checked=0
+        for path in files:
+            if not path.is_file():continue
+            with self.subTest(config=path):
+                cfg=ui.load_config(str(path))
+                self.assertEqual(cfg.get('threads',{}).get('worker_threads',-1),-1,
+                                 f'{path} 写死了线程数；随包配置必须是 -1（自动）')
+                checked+=1
+        self.assertGreaterEqual(checked,6)
+
     def test_outer_config_word_files_and_archive_payload_match(self):
         configs=package_release.distribution_configs()
         self.assertIn('config_words_sequential.yaml',configs)

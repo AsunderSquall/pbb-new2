@@ -40,4 +40,4 @@ output:
   speed_output: 1
   result_file: football.txt
 threads:
-  worker_threads: 40
+  worker_threads: -1

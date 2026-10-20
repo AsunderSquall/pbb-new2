@@ -18,7 +18,7 @@ import time
 from collections import Counter, defaultdict
 
 from . import build_settings, paths
-from .threading_config import resolve_threads
+from .threading_config import available_threads, resolve_threads
 
 # 仓库根：构建选项、源码树与二进制都以它为基准。定义收拢在 pbb/paths.py。
 ROOT = paths.REPO_ROOT
@@ -138,8 +138,16 @@ class Tuner:
         shutil.copy2(args.config, self.run/('config'+Path(args.config).suffix))
         self.task = _build_task_config(load_config(args.config))
         configured_threads = self.task.get('n_threads', -1)
+        self.available_threads = available_threads()
         self.task['n_threads'] = resolve_threads(configured_threads)
-        print(f"Threads: {self.task['n_threads']} ({'automatic' if configured_threads == -1 else 'configured'}); fixed for all trials.", flush=True)
+        print(f"Threads: {self.task['n_threads']} ({'automatic' if configured_threads == -1 else 'configured'}); "
+              f"fixed for all trials. Available logical CPUs: {self.available_threads}.", flush=True)
+        if configured_threads != -1 and self.task['n_threads'] > self.available_threads:
+            # 显式线程数按设计优先（见 docs/AUTOTUNE.md），这里只提示、不代改：
+            # 一份从别的机器带过来的配置会把本机压到过载降频，测出的速度也随之偏低。
+            print(f"警告：配置显式指定 {self.task['n_threads']} 线程，但本机只有 "
+                  f"{self.available_threads} 个可用逻辑CPU。本机可能过载降频，结果也不能与别的机器比较；"
+                  "若不是有意固定，请把 threads.worker_threads 改回 -1（自动）。", flush=True)
         build.ensure_core()
         pbb_core = engine._pbb_core()
         self.charset = engine._build_charset(self.task['character_set'])
@@ -161,6 +169,7 @@ class Tuner:
              compiler_version=self.process([self.compiler, '--version']).stdout.decode(errors='replace'),
              base_flags=self.base_flags, simd=self.simd, target=args.target, mode=args.mode,
              test_minutes=args.minutes, speed_tday=args.speed, threads=self.task['n_threads'], task=self.task, charset=self.charset,
+             available_threads=self.available_threads,
              sources=self.sources, python=sys.executable))
         self.flush()
         print('Results:', self.run, flush=True)
@@ -506,7 +515,8 @@ class Tuner:
                       measured_target=self.args.target,final_pairs=final_pairs,combination_confirmed=confirmed,
                       elapsed=time.monotonic()-self.started,config=str(Path(self.args.config).resolve()),
                       test_seconds=self.test_used,compile_seconds=self.compile_seconds,
-                      initial_options=self.initial,minimum=self.args.minimum,threads=self.task['n_threads'])
+                      initial_options=self.initial,minimum=self.args.minimum,threads=self.task['n_threads'],
+                      threads_available=self.available_threads)
         save(self.run/'selection.json',result)
         settings=dict(build_settings.fresh(),tested=True,status='complete',options=dict(switches),
              machine=result['machine'],compiler=self.compiler,source_hashes=self.sources,result=str(self.run))
@@ -523,7 +533,7 @@ class Tuner:
         print('Complete. Selection:', self.run/'selection.json',flush=True)
 
     def report(self,result):
-        lines=['# PBB 自动测评结果','',f'状态：{result["status"]}；目标：{self.args.target}；线程保持 {result["threads"]}。',
+        lines=['# PBB 自动测评结果','',f'状态：{result["status"]}；目标：{self.args.target}；线程保持 {result["threads"]}（本机可用逻辑CPU {result["threads_available"]}）。',
                f'测试耗时 {result["test_seconds"]:.1f}s；测试预算 {self.args.minutes*60}s；编译 {result["compile_seconds"]:.1f}s（不计入预算）；总耗时 {result["elapsed"]:.1f}s。','',
                '逐项测试的原始速度、完整输出排序哈希、汇总、UI协议和运行参数见 measurements.json / runs/。',
                '邻居试验均先编译和正确性检查，再预热、正反交错配对；只保留达到重复确认条件的收益。','']
