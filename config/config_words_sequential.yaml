@@ -43,19 +43,19 @@ threads:
 character_sets:
   形容词:
     single_char_length: 6
-    file: D:\namerena\files\pbb_new2_git\charsets\adjectives.txt
+    file: ../charsets/adjectives.txt
     file_format: lines
   名词:
     single_char_length: 6
-    file: D:\namerena\files\pbb_new2_git\charsets\nouns.txt
+    file: ../charsets/nouns.txt
     file_format: lines
   副词:
     single_char_length: 6
-    file: D:\namerena\files\pbb_new2_git\charsets\adverbs.txt
+    file: ../charsets/adverbs.txt
     file_format: lines
   动词:
     single_char_length: 6
-    file: D:\namerena\files\pbb_new2_git\charsets\verbs.txt
+    file: ../charsets/verbs.txt
     file_format: lines
 format:
 - charset: 形容词
