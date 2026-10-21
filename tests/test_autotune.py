@@ -115,6 +115,33 @@ class AutoTuneTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'name mismatch'):
                 tune.Tuner.same(a,b)
 
+    # 现场事故（2026-10-21，22 线程机器）：性能轮次用配置的 output_xp=0，引擎只写
+    # 「名字@队伍」不写分数列，同分并列的 Top5 边界换人时池子必然为空；旧判定把
+    # “证明不出来”当成“有差异”，于是跑了一轮多之后抛 name mismatch 直接崩掉。
+    # 性能轮次必须容忍“无证据”，但仍不能放过“有证据且分数不同”。
+    def test_performance_round_tolerates_unprovable_tie_names(self):
+        with tempfile.TemporaryDirectory(dir=tune.ROOT/'build') as temp:
+            p=Path(temp);(p/'out').mkdir()
+            (p/'params.txt').write_text('score_list=fs\noutput_xp=0\n')
+            (p/'out/results.txt').write_bytes(b'')      # output_xp=0 时引擎不写分数列
+            a=dict(identity={},hashes={},directory=temp,top=[('fs',3399,'AAAA')])
+            b=dict(a,top=[('fs',3399,'BBBB')])
+            tune.Tuner.same(a,b,require_score_proof=False)   # 性能轮次：按并列处理
+            with self.assertRaisesRegex(RuntimeError,'name mismatch'):
+                tune.Tuner.same(a,b)                         # 正确性对拍仍要求证据
+
+    # 反过来：结果文件带着分数列、且换上的名字分数确实不同 —— 这不是并列，是真实差异，
+    # 性能轮次也必须失败（放宽的只是“没有证据”，不是“有反证”）。
+    def test_performance_round_rejects_a_proven_name_difference(self):
+        with tempfile.TemporaryDirectory(dir=tune.ROOT/'build') as temp:
+            p=Path(temp);(p/'out').mkdir()
+            (p/'params.txt').write_text('score_list=fs\noutput_xp=1\n')
+            (p/'out/results.txt').write_bytes(b'foo@team 3399\nbar@team 3300\n')
+            a=dict(identity={},hashes={},directory=temp,top=[('fs',3399,'666F6F407465616D')])
+            b=dict(a,top=[('fs',3399,'626172407465616D')])
+            with self.assertRaisesRegex(RuntimeError,'name mismatch'):
+                tune.Tuner.same(a,b,require_score_proof=False)
+
     # 安装/回退的安全边界：安装前必须备份现有二进制与 .build.json 清单，同一结果目录
     # 只能安装一次（第二次应报 backup already），回退要还原二进制和清单原文。
     # 夹具在临时目录里伪造一次完整测速结果（selection.json + 新旧二进制 + 源码哈希），

@@ -269,18 +269,23 @@ class Tuner:
         return row
 
     @staticmethod
-    def same(a, b):
+    def same(a, b, require_score_proof=True):
         """断言两次运行的「结果」完全相同，不同就抛错终止本轮。
 
         这是自动测速的安全阀：只接受**结果等价**的加速。
         判定分三层：
           1. identity 与结果文件哈希必须逐字节一致（排序后比较，抵消线程到达顺序差异）；
           2. UI Top 的 (族, 分数) 序列必须一致；
-          3. Top 名单里同分组内的名字允许顺序不同（完成顺序会重排并列项），
-             但**分数为正**的名字若出现差异，必须用结果文件的分数证明它们确实同分，
-             否则判为真实差异。
-        第 3 层是为了不把「同分并列的到达顺序变化」误判成正确性问题，
-        同时又不放过真正的分数差异；低于等于 0 分的分组不参与比较。
+          3. Top 名单里同分组内的名字允许顺序不同（完成顺序会重排并列项）；
+             名字确实换了时，用结果文件的分数核对：查得到且分数不同 ⇒ 真实差异。
+        第 3 层的证据是结果文件的「分数列」，而性能测量沿用配置里的 output_xp（随包足球
+        配置是 0），引擎此时只写「名字@队伍」不写分数列（见 engine.hpp 的 output_xp 分支），
+        证据必然缺失。所以第 3 层分两种口径：
+          - require_score_proof=True（默认，正确性对拍用）：查不到证据就判失败；
+          - require_score_proof=False（paired() 的性能测量用）：查不到证据按并列处理，
+            查得到但分数不同仍然失败。候选的正确性由 verify() 用 output_xp=1、阈值压到 1
+            的覆盖任务单独证明，不依赖这里的性能轮次。
+        低于等于 0 分的分组不参与比较。
         """
         if a['identity'] != b['identity'] or a['hashes'] != b['hashes']:
             raise RuntimeError('Correctness mismatch: '+a['directory']+' versus '+b['directory'])
@@ -317,7 +322,12 @@ class Tuner:
                         except ValueError:continue
                         pool[parts[0].hex().upper()]=dict(zip(families,scores))
             changed=set(names-other)|set(other-names)
-            if any(pool.get(name,{}).get(family)!=score for name in changed):
+            # 证据只能「证伪」或「证实」：查得到且分数不同 → 真实差异，两种口径都失败；
+            # 查不到（性能轮次没有分数列）→ 无从证明，按并列处理，除非要求严格证据。
+            contradicted=[name for name in changed
+                          if name in pool and pool[name].get(family)!=score]
+            unproven=[name for name in changed if name not in pool]
+            if contradicted or (unproven and require_score_proof):
                 raise RuntimeError('UI Top name mismatch outside verified equal-score group: '
                     +family+' '+str(score)+'; '+a['directory']+' versus '+b['directory'])
 
@@ -408,7 +418,10 @@ class Tuner:
           - 每轮**交换先后顺序**（偶数轮 a→b，奇数轮 b→a），抵消"后跑者受前一次影响"
             这类系统偏差；
           - 每轮都调用 same() 对拍，确保比较的是两个结果等价的二进制 —— 只比快慢
-            不比正确性的加速结论是不能采信的。
+            不比正确性的加速结论是不能采信的。这里的对拍用 require_score_proof=False：
+            性能轮次按配置的 output_xp（随包足球配置是 0）运行，结果文件没有分数列，
+            同分并列的 Top 名字换人拿不到证据（见 same() 的说明）；真正的正确性由
+            verify() 用 output_xp=1、阈值压到 1 的覆盖任务在每轮测量之前独立证明。
         返回的 pairs 交给 choose() 判定是否接受。
         """
         self.last_rates={a:[],b:[]}
@@ -419,7 +432,7 @@ class Tuner:
             data = {}
             for binary in ((a,b) if i%2==0 else (b,a)):
                 data[binary] = self.execute(binary, dict(self.performance,seed=SEEDS[i%3]), self.charset, label+f'_{i}')
-            self.same(data[a],data[b])
+            self.same(data[a],data[b],require_score_proof=False)
             for binary in (a,b):self.last_rates[binary].append(data[binary]['speed'])
             change = data[b]['speed']/data[a]['speed']-1
             pairs.append(change)
@@ -547,7 +560,7 @@ class Tuner:
                   '正确性包含多编码、枚举、前后缀、队伍、全部评分族、非空数值输出、收集及复制边界。潜力使用原阈值，未强制验证每种潜力命中；未追踪所有其他中间状态。',
                   '精简版验证 mode1/2；完整版验证 mode1/2/3/4。仅在所选配置和目标上判断性能，另一目标只验证正确性。',
                   '未调线程数，未修改评分、门控或候选生成。低阈值只用于正确性；性能保留配置的评分、潜力、收集及结果输出设置，关闭终端进度日志。',
-                  '同分Top保持原到达顺序规则；零分同分名允许变化，正分差异须验证同分或拒绝。',
+                  '同分Top保持原到达顺序规则；零分同分名允许变化。正分同分组换名字时，正确性对拍要求结果文件证明其同分，查不到证据即失败；性能轮次按配置的 output_xp 运行，结果文件通常没有分数列，此时无证据按并列处理，有证据且分数不同仍失败。',
                   '这是 O(n) 局部搜索，不声称穷举最优。时长为软目标，超时继续；错误/中断会留下 incomplete.json。',
                   '默认只保存构建选择，测试后仍须 Rebuild，否则实际引擎尚未应用该选择；--apply 是直接安装的例外。',
                   '没有可靠温度、频率、功耗或 PMU 遥测。native产物只限本机，不用于通用发布包。','',
