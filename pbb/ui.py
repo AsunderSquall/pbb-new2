@@ -85,6 +85,22 @@ COUNT_RE = re.compile(r"count:([0-9.]+)T")
 CURRENT_RE = re.compile(r"cur_speed:([0-9.]+)T/d")
 
 
+def _blend_colors(base: str, tint: str, ratio: float) -> str:
+    """把 ``tint`` 按比例混进 ``base``（两个 ``#rrggbb``），用于生成主题自适应的底色。
+
+    配置选择器里给"默认配置"整行加高亮：浅色主题要变浅、深色主题要变暗，直接写死一种
+    颜色在另一主题下要么看不见、要么刺眼，所以按当前主题的两个颜色算。
+    """
+    try:
+        ratio = max(0.0, min(1.0, float(ratio)))
+        left = [int(base[i:i + 2], 16) for i in (1, 3, 5)]
+        right = [int(tint[i:i + 2], 16) for i in (1, 3, 5)]
+    except (TypeError, ValueError):
+        return base
+    mixed = [round(a + (b - a) * ratio) for a, b in zip(left, right)]
+    return "#" + "".join(f"{value:02x}" for value in mixed)
+
+
 def blank_config() -> dict:
     """构造一份「空白但合法」的配置，供「编辑新配置」使用。
 
@@ -618,6 +634,7 @@ class ConfigSelector(tk.Toplevel):
         ("single_char_length", "单字符字节数", 130),
         ("charset_size", "字符集大小", 110),
         ("tested", "已测数量", 110),
+        ("default", "默认", 70),
     )
 
     @staticmethod
@@ -749,22 +766,36 @@ class ConfigSelector(tk.Toplevel):
         return os.path.join(CONFIG_DIR, name)
 
     def refresh(self):
-        """重新扫描 config/ 并重建表格，尽量保持原选中项。"""
+        """重新扫描 config/ 并重建表格，尽量保持原选中项。
+
+        界面设置里记着的默认配置（`settings/ui_settings.json` 的 `default_config`）
+        额外用 ★ 标记 + 整行高亮，一眼能认出"下次打开界面会加载哪一个"。
+        """
         keep = None
         if self.tree.selection():
             keep = self.tree.item(self.tree.selection()[0], "values")[0]
+        default_name = str(load_ui_settings().get("default_config") or "")
+        colors = self.monitor.colors
+        # 高亮用「底色向强调色混一点」：浅色主题是浅灰绿、深色主题是深绿，两种主题下
+        # 都能跟普通行区分开，又不会和"选中行"（强调色底）混淆。
+        self.tree.tag_configure("default_config",
+                                background=_blend_colors(colors["field"], colors["accent"], 0.18),
+                                foreground=colors["text"])
         self.tree.delete(*self.tree.get_children())
         for path in self._config_files():
             name = os.path.basename(path)
+            is_default = bool(default_name) and os.path.basename(default_name) == name
             try:
                 summary = self.monitor._config_summary(load_config(path))
                 values = (name, summary["prefixes"], summary["variable_length"],
                           summary["single_char_length"], summary["charset_size"],
-                          self._format_tested(summary["tested"]))
+                          self._format_tested(summary["tested"]),
+                          "★ 默认" if is_default else "")
             except Exception:
                 # 读不出来的配置也要列出来（否则用户不知道它坏了），只把参数留空
-                values = (name, "-", "-", "-", "-", "-")
-            self.tree.insert("", "end", values=values)
+                values = (name, "-", "-", "-", "-", "-", "★ 默认" if is_default else "")
+            self.tree.insert("", "end", values=values,
+                             tags=("default_config",) if is_default else ())
         if keep:
             for item in self.tree.get_children():
                 if self.tree.item(item, "values")[0] == keep:
@@ -1140,7 +1171,7 @@ class Monitor(tk.Tk):
         self.apply_threads_button.grid(row=5, column=1, sticky="ew", padx=(6, 0))
         ttk.Label(controls, text="0 = 暂停计算；回车或点“应用”生效",
                   font=(UI_FONT, 9)).grid(row=6, column=0, columnspan=2, sticky="w")
-        ttk.Label(controls, text="预测总量").grid(row=7, column=0, sticky="w", pady=(10, 2))
+        ttk.Label(controls, text="预计总量").grid(row=7, column=0, sticky="w", pady=(10, 2))
         ttk.Entry(controls, textvariable=self.range_var).grid(row=8, column=0, columnspan=2, sticky="ew")
         ttk.Label(controls, text="结果文件").grid(row=9, column=0, sticky="w", pady=(10, 2))
         self._build_main_result_file(controls)
@@ -1967,7 +1998,7 @@ class Monitor(tk.Tk):
     def _refresh_prefix_range_state(self, _event=None):
         """按枚举模式启用/禁用区间输入框。
 
-        顺序模式下**全局区间是总控制器**（已测数量 + 预测总量），必须可编辑；前缀区间
+        顺序模式下**全局区间是总控制器**（已测数量 + 预计总量），必须可编辑；前缀区间
         只是布局，也允许编辑（但程序自己不会改它们）。随机模式用不到前缀区间，禁掉。
         """
         is_sequential = self.editor_choice_maps["enumeration.mode"][self.editor_vars["enumeration.mode"].get()] == 1
@@ -2036,6 +2067,12 @@ class Monitor(tk.Tk):
         ttk.Label(actions, text="文件名").pack(side="left", padx=(0, 6))
         ttk.Entry(actions, textvariable=self.editor_name_var, width=24).pack(side="left")
         ttk.Button(actions, text="保存", command=self._save_editor).pack(side="left", padx=(8, 0))
+        # 「使用默认配置」= 把界面设置里记录的默认评分阈值填回本页（不动字符集/前缀）；
+        # 「设为默认配置」= 把当前文件名与评分阈值写进界面设置，成为以后新配置的默认值。
+        ttk.Button(actions, text="使用默认配置",
+                   command=self._use_default_config).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="设为默认配置",
+                   command=self._save_as_default_config).pack(side="left", padx=(6, 0))
         recommendation = ttk.Frame(editor, padding=(22, 0, 22, 10))
         recommendation.pack(fill="x")
         self._wrap_label(ttk.Label(
@@ -2184,12 +2221,12 @@ class Monitor(tk.Tk):
         self.global_range_section = ttk.LabelFrame(affixes, padding=10)
         self.global_range_section.pack(fill="x", pady=(0, 12))
         global_start = field(self.global_range_section, 0, "已测数量", "range.start", rng.get("start", 0), width=18)
-        global_end = field(self.global_range_section, 0, "预测总量", "range.end", rng.get("end", -1), column=1, width=18)
+        global_end = field(self.global_range_section, 0, "预计总量", "range.end", rng.get("end", -1), column=1, width=18)
         self.global_range_widgets = (global_start, global_end)
-        # 一行说明，避免"已测数量/预测总量"被当成随机模式的编号区间：
+        # 一行说明，避免"已测数量/预计总量"被当成随机模式的编号区间：
         # 顺序模式下它们是**全局坐标**（所有前缀累加），-1 = 全部前缀的总量。
         ttk.Label(self.global_range_section,
-                  text="已测数量 = 总量里已经测过多少、从哪开始；预测总量 = 总量上界（-1 = 所有前缀总量之和）。"
+                  text="已测数量 = 总量里已经测过多少、从哪开始；预计总量 = 总量上界（-1 = 所有前缀总量之和）。"
                        "前缀区间只是布局，程序不会改它。",
                   font=(UI_FONT, 9), justify="left", wraplength=pixels(760)
                   ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -2524,6 +2561,76 @@ class Monitor(tk.Tk):
                     normalized.append(family)
         return ",".join(family for family in FAMILIES if family in normalized)
 
+    def _editor_default_name(self) -> str:
+        """编辑器当前应该被保存成的文件名（与 _save_editor 的取名规则一致，只算不写）。"""
+        raw = self.editor_name_var.get().strip() or os.path.basename(self.config_var.get().strip())
+        raw = os.path.basename(raw.replace("\\", "/"))
+        if raw and not os.path.splitext(raw)[1]:
+            raw += ".yaml"
+        return raw
+
+    def _use_default_config(self):
+        """「使用默认配置」：把界面设置里的默认评分阈值填回编辑页。
+
+        只覆盖**评分阈值**（`collection`），字符集/前缀/枚举范围这些"这份配置自己的
+        东西"保持不动 —— 否则会把用户正在编辑的内容整片冲掉，而默认值本身并不包含
+        这些信息。填完仍需点「保存」才落盘。
+        """
+        defaults = load_ui_settings().get("collection")
+        if not isinstance(defaults, dict) or not defaults:
+            messagebox.showinfo(
+                "没有默认配置",
+                f"settings/{UI_SETTINGS_NAME} 里没有记录默认评分阈值。\n"
+                "先在编辑器里设好阈值，再点「设为默认配置」。",
+                parent=self.editor)
+            return
+        applied = []
+        for key, value in defaults.items():
+            var = self.editor_vars.get(f"collection.{key}")
+            if var is not None:
+                var.set(str(value))
+                applied.append(key)
+        self.status_var.set(f"已把默认评分阈值填回编辑页（{len(applied)} 项）；点「保存」后生效")
+
+    def _save_as_default_config(self):
+        """「设为默认配置」：把当前文件名与评分阈值写进界面设置。
+
+        写入 `settings/ui_settings.json` 的两项：
+          * ``default_config`` —— 打开界面时默认加载哪个配置文件（选择器里的「设为
+            启动默认」写的是同一项）；
+          * ``collection``      —— 新配置的默认评分阈值（「编辑新配置」读它）。
+        """
+        try:
+            cfg = self._editor_config()
+            _validate_config(cfg)
+        except Exception as exc:
+            messagebox.showerror("无法设为默认配置", str(exc), parent=self.editor)
+            return
+        name = self._editor_default_name()
+        if not name:
+            messagebox.showerror("无法设为默认配置", "请先填写配置文件名。", parent=self.editor)
+            return
+        if not messagebox.askyesno(
+                "设为默认配置",
+                f"把「{name}」设为默认配置？\n\n"
+                "· 打开界面时默认加载它（文件需存在于 config/）；\n"
+                "· 当前编辑页的评分阈值会成为新配置的默认值。",
+                parent=self.editor):
+            return
+        settings = load_ui_settings()
+        settings["default_config"] = name
+        settings["collection"] = dict(cfg.get("collection") or {})
+        try:
+            save_ui_settings(settings)
+        except OSError as exc:
+            messagebox.showerror("无法保存界面设置", str(exc), parent=self.editor)
+            return
+        # 选择器表格里的「默认」标记要立刻更新（它可能正开着）。
+        selector = getattr(self, "_config_selector", None)
+        if selector is not None and selector.winfo_exists():
+            selector.refresh()
+        self.status_var.set(f"默认配置：{name}（评分阈值也已记为默认）")
+
     def _save_editor(self, start=False, name: str | None = None):
         """保存编辑器内容到 **一个** 目标文件。
 
@@ -2794,12 +2901,12 @@ class Monitor(tk.Tk):
         self.editor = None
 
     def _apply_range_end(self, cfg: dict) -> None:
-        """把主窗口「预测总量」这一格落到**全局**区间上（所有模式都生效）。
+        """把主窗口「预计总量」这一格落到**全局**区间上（所有模式都生效）。
 
         全局区间是唯一的总控制器（见 pbb/sequential.py）：顺序模式下它表示"所有前缀
         总量"的坐标上界，`-1` = 全部。**前缀区间一个字都不动** —— 它们只是布局。
 
-        以前这里只对 format 配置生效，普通/顺序配置在界面上改「预测总量」毫无作用；
+        以前这里只对 format 配置生效，普通/顺序配置在界面上改「预计总量」毫无作用；
         上一版还会把"每个前缀都一样"的 prefix_ranges 收成全局区间，同样违反"绝不修改
         前缀区间"的约定，这次一并去掉。
         """
@@ -2812,13 +2919,13 @@ class Monitor(tk.Tk):
         ranges = en.get("ranges") or [{"start": 0, "end": -1}]
         en["ranges"] = ranges
         ranges[0]["end"] = end
-        self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，预测总量这一格不生效")
+        self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，预计总量这一格不生效")
 
     def _start(self):
         """校验界面输入并启动一次测号任务（图形监控器入口）。
 
         流程：读配置 → 校验 → 可选续测 → 组装 task → 锁定启动参数 → 交给后台线程。
-        这里只做「启动瞬间」的参数拍板：启动线程、预测总量、结果文件取自界面，
+        这里只做「启动瞬间」的参数拍板：启动线程、预计总量、结果文件取自界面，
         之后就锁住不再允许改（活跃线程仍可在运行中调整，见 _apply_runtime_threads）。
         任何异常都弹窗提示且不进入运行态。
         """

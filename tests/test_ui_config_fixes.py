@@ -174,6 +174,60 @@ class DefaultThresholdsTests(unittest.TestCase):
         self.assertEqual(shipped.get('collection'), football['collection'])
 
 
+class EditorDefaultButtonsTests(unittest.TestCase):
+    """配置编辑页的「使用默认配置」/「设为默认配置」。"""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory(dir=str(ROOT / 'build'))
+        self.settings_dir = os.path.join(self._temp.name, 'settings')
+        self._patches = [patch.object(ui, 'SETTINGS_DIR', self.settings_dir)]
+        for item in self._patches:
+            item.start()
+        ui.save_ui_settings({'default_config': 'config_football.yaml',
+                             'collection': {'min_qp': 5400, 'score_list': 'qp'}})
+        self.app = ui.Monitor()
+        self.app.withdraw()
+        self.app._open_editor()
+        self.app.update()
+
+    def tearDown(self):
+        self.app._close_editor()
+        for callback in self.app.tk.call('after', 'info'):
+            self.app.after_cancel(callback)
+        self.app.destroy()
+        for item in reversed(self._patches):
+            item.stop()
+        self._temp.cleanup()
+
+    def test_use_default_config_fills_thresholds_only(self):
+        self.app.editor_vars['collection.min_qp'].set('1')
+        self.app.editor_vars['team_name'].set('不该被默认值覆盖')
+        self.app._use_default_config()
+        self.assertEqual(self.app.editor_vars['collection.min_qp'].get(), '5400')
+        self.assertEqual(self.app.editor_vars['team_name'].get(), '不该被默认值覆盖')
+
+    def test_save_as_default_config_writes_name_and_collection(self):
+        self.app.editor_vars['collection.min_qp'].set('1234')
+        with patch.object(ui.messagebox, 'askyesno', return_value=True) as ask:
+            self.app._save_as_default_config()
+        ask.assert_called_once()
+        saved = ui.load_ui_settings()
+        self.assertEqual(saved['default_config'], os.path.basename(self.app._editor_default_name()))
+        self.assertEqual(saved['collection']['min_qp'], 1234)
+
+    def test_selector_marks_the_default_row(self):
+        selector = ui.ConfigSelector(self.app)
+        try:
+            self.app.update()
+            rows = {selector.tree.item(item, 'values')[0]: selector.tree.item(item, 'values')[-1]
+                    for item in selector.tree.get_children()}
+            self.assertEqual(rows.get('config_football.yaml'), '★ 默认')
+            self.assertTrue(all(value == '' for name, value in rows.items()
+                                if name != 'config_football.yaml'))
+        finally:
+            selector.destroy()
+
+
 class OutputDirectoryTests(unittest.TestCase):
     """测号输出落在包根 out/，不再埋进 source/ 或 PBBMonitor/_internal/。"""
 
