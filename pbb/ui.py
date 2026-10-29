@@ -38,6 +38,11 @@ ROOT = str(paths.DATA_ROOT)
 CONFIG_DIR = str(build_settings.config_root(ROOT))
 # 应用设置（ui_settings.json、build_config.json）与测号配置分开放（见 build_settings 模块说明）。
 SETTINGS_DIR = str(build_settings.settings_root(ROOT))
+# 测号输出落在**包根的 out/**（见 paths.OUT_DIR）：发布包里就是 PBB/out/，
+# 不再埋在 source/out 或 PBBMonitor/_internal/out。引擎会自己拼 "out/<结果文件>"，
+# 所以交给引擎的工作目录是它的上一级（RESULT_ROOT）。
+OUT_DIR = str(paths.OUT_DIR)
+RESULT_ROOT = str(paths.PACKAGE_ROOT)
 UI_FONT = "等距更纱黑体 SC"
 # 字体与图标的绝对路径统一由 pbb/paths.py 给出，PyInstaller 打包后同样解析到 _internal/ 下。
 UI_FONT_FILE = str(paths.FONT_FILE)
@@ -88,6 +93,10 @@ def blank_config() -> dict:
     suffixes）在这里补最小可用取值。目标不是"一份好配置"，而是**能通过
     _validate_config 并打开编辑器**，让用户从空白开始填。
 
+    **评分阈值来自界面设置**：settings/ui_settings.json 的 ``collection`` 段就是
+    "新配置的默认阈值"，初始值等于 config_football.yaml 的 collection。用户想改默认
+    阈值就改这个文件；缺这段时退回 CONFIG_MAP 的默认值。
+
     关键取舍：
       - 字符集用「自定义字符」且给一个非空占位（校验要求自定义字符非空），
         并把它写成 "" + 2 个占位字符，避免用户面对一个必然报错的空配置；
@@ -105,9 +114,11 @@ def blank_config() -> dict:
             node = node.setdefault(part, {})
         node[parts[-1]] = fd.default
 
-    # 新配置采用 PP/PD 默认门阈值；缺省字段的旧配置仍按 CONFIG_MAP 的 0 解释。
-    cfg['collection']['min_pp'] = 8000
-    cfg['collection']['min_pd'] = 8800
+    # 默认评分阈值：settings/ui_settings.json 的 collection 段（初始值 = 足球配置）。
+    defaults = load_ui_settings().get("collection")
+    if isinstance(defaults, dict):
+        cfg.setdefault("collection", {}).update(
+            {key: value for key, value in defaults.items() if isinstance(key, str)})
 
     # team_name 必须非空（校验会拒绝空值），给一个占位名提醒用户去改
     cfg["team_name"] = "请填写队伍名"
@@ -2704,7 +2715,7 @@ class Monitor(tk.Tk):
             result_file = getattr(self, '_run_result_file', None)
             if 'format' in cfg and result_file:
                 from .main import _try_resume
-                resumed = _try_resume(cfg, result_file, out_dir=ROOT)
+                resumed = _try_resume(cfg, result_file, out_dir=RESULT_ROOT)
                 if resumed is not None:
                     advanced = int(resumed[0]["enumeration"]["ranges"][0].get("start", 0) or 0)
             if advanced is None:
@@ -2811,7 +2822,7 @@ class Monitor(tk.Tk):
             # 格式顺序任务使用连续完成检查点；旧配置保留命中反推语义。
             if resume:
                 from .main import _try_resume
-                resumed = _try_resume(cfg, self._run_result_file, out_dir=ROOT)
+                resumed = _try_resume(cfg, self._run_result_file, out_dir=RESULT_ROOT)
                 if resumed is not None:
                     cfg = resumed[0]
                     # resume 的语义是「先把全局 start 改到读到的位置，再从 start 开跑」：
@@ -2909,7 +2920,10 @@ class Monitor(tk.Tk):
                 self.events.put(("finished", "已停止"))
                 return
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            self.proc = subprocess.Popen([binary], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            # 输出统一落在**包根 out/**：引擎自己会拼 "out/<结果文件>"，所以工作目录取
+            # 它的上一级（发布包里是 PBB/，不再埋进 source/ 或 PBBMonitor/_internal/）。
+            os.makedirs(OUT_DIR, exist_ok=True)
+            self.proc = subprocess.Popen([binary], cwd=RESULT_ROOT, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                                          creationflags=creationflags)
             if self.stop_requested:
@@ -2933,7 +2947,7 @@ class Monitor(tk.Tk):
         引擎在工作期间轮询 out/.threads；UI 改写它即可在不重启引擎的前提下
         调整工作线程数（每个工作线程在当前 chunk 完成后才响应）。
         """
-        return os.path.join(ROOT, "out", ".threads")
+        return os.path.join(OUT_DIR, ".threads")
 
     def _write_runtime_threads(self, count: int):
         """原子地发布当前活跃线程上限，供运行中的引擎读取。

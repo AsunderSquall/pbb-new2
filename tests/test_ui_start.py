@@ -37,7 +37,7 @@ class StartEntryTests(unittest.TestCase):
                     task=worker.call_args.kwargs['args'][0]
                     self.assertEqual(task['n_threads'],2)
                     self.assertEqual(task['range_R'],100)
-                    if resume:try_resume.assert_called_once_with(cfg,'selected.txt',out_dir=ui.ROOT)
+                    if resume:try_resume.assert_called_once_with(cfg,'selected.txt',out_dir=ui.RESULT_ROOT)
                     else:try_resume.assert_not_called()
 
 

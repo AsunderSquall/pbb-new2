@@ -209,6 +209,8 @@ def main():
         copy_file(path, root / "source" / path)
     # 配置统一放在发布根的 config/; source/ 与 PBBMonitor/_internal/ 里不留副本。
     package_release.stage_configs(root)
+    # 测号输出目录：包根 out/（与 source/、config/ 同级）。
+    (root / "out").mkdir(parents=True, exist_ok=True)
     # offline/ 是发布包根目录模板: README/ENVIRONMENT.md 与 8 个外壳脚本。
     for path in Path("offline").iterdir():
         copy_file(path, root / path.name)
@@ -282,11 +284,12 @@ def main():
     # 因此在写 manifest 与压缩之前, 再用基线二进制覆盖回去。
     copy_baseline_binaries(root / "source/build")
     # bundle.json: 机器可读的包信息(版本/平台/构建模式/验证方式/工具链包清单)。
-    manifest = {"python": sys.version.split()[0], "platform": "windows-x64", "binary_mode": "portable",
+    manifest = {"version": package_release.release_version(),
+                "python": sys.version.split()[0], "platform": "windows-x64", "binary_mode": "portable",
                 "verification": "offline native rebuild plus test suite passed",
                 "toolchain_packages": [metadata["NAME"][0] for _, metadata in packages]}
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
-    archive_path = Path("release/PBB-windows-x64-environment.zip")
+    archive_path = Path(f"release/PBB-windows-x64-environment-{package_release.release_version()}.zip")
     print("[offline] Compressing the independent Python/GCC environment...", flush=True)
 
     # compresslevel=6: 环境包约 600 MB, 取默认级别之上的一档做速度/体积折中。

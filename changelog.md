@@ -2,7 +2,7 @@
 
 PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 
-本文整理至 2026-10-15。
+本文整理至 2026-10-29。
 
 ## 维护约定
 
@@ -13,21 +13,7 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 
 ---
 
-## 未发布
-
-### 修复
-
-- **随包配置写死线程数（tune 在任何机器上都用同一个线程数）**：`pbb_linux/config/` 的 `config.yaml`、`config_football.yaml`、`config86_bc.yaml` 分别写死 `worker_threads` 40/40/12；首发版 `config/config_football.yaml` 也是 40，而发布的 `config.yaml` 由它生成，于是 tune 与正式测号在所有用户机器上都固定同一个线程数——核少的机器过载降频、核多的机器用不满，测速数据也不可与别的机器比较。三份配置改回 `-1`（自动）；新增 `test_bundled_configs_never_hardcode_a_machine_thread_count` 守住该回退。
-- **Linux 版 tune 不解析 `-1`**：`pbb_linux/source/autotune.py` 把配置里的 `n_threads` 原样交给引擎；引擎收到 `-1` 不会创建任何 consumer，而队列只有 4 个槽，producer 填满后永久阻塞——任务卡死。现在 tune 启动时按 `os.cpu_count()` 解析一次并显示实际线程数（与 `main.py` 的口径一致）。
-- **词族配置写死开发机绝对路径**：`config/config_words_sequential.yaml` 的四个 `file:` 写成 `D:\namerena\files\...`，随包到别的机器必然加载失败（`tests/test_distribution_configs.py` 因此失败）。按 `docs/PACKAGING.md` 改回 `../charsets/`。
-- **配置选择器打开编辑器再关闭后界面卡死数秒**：`<Destroy>` 会沿 bindtags 冒泡，编辑器里**每一个子控件**销毁都会触发一次收尾回调（足球配置的编辑器有 158 个后代控件），旧代码每次都在 `after(50)` 里做 `grab_set` + 整表重建（重新读取并解析 `config/` 下全部配置、再算字符集大小）。现在只认编辑器顶层本身、每个编辑器只收尾一次；实测关闭后 `refresh` 与 `grab_set` 各 1 次。
-- **测完的配置无法再编辑**：`enumeration.ranges[].end == start` 被「必须 > start」拒绝，而「自动更新 start」测完正好把 start 推到 end。现在空区间合法（`end < start` 仍拒绝），`prefix_ranges` 同样放宽。
-- **前缀名字里带换行会让后面的前缀静默不测**：引擎参数按行/逗号分隔且不转义，前缀名含换行时 `prefixes=` 那一行被截断——现场（`test-shunxu.toml`，3 个前缀）实际只跑了 2 个，第 3 个一个候选都没测。根因是**单行输入框里看不见的换行**：往 Tk 的 Entry 粘贴多行文本时，换行/制表符会原样写进 StringVar，界面上完全看不出来。现在前后缀名、队伍名、结果文件名的输入框"写入即清洗"（键入、粘贴、代码赋值都覆盖，按回车也不会留下隐形回车），落盘前再兜一次；配置校验仍拒绝逗号、换行、回车、制表符与 NUL（手写配置会得到明确报错）。
-- **保存配置会吃掉队伍名的首尾空格**：`_editor_config` 对 `team_name` 做了 `.strip()`。改为原样保存；首尾空格在 YAML/JSON/TOML 三种格式下都能往返（新增用例）。
-- **深色模式下配置选择器表格仍是白底**：`ttk.Treeview` 不跟随 `TFrame`/`TLabel`，现在表格、表头与选中行都按主题着色。
-- **顺序模式的全局区间、start 不生效**：①主窗口「范围终点」以前只对 format 配置生效，普通/顺序配置改了没用；②编辑器保存时总会写一份与全局相同的 `prefix_ranges`，把全局区间和「自动更新 start」那条路径盖住；③「自动更新 start」只推进 `ranges`。现在统一为「全局区间是总控制器」：范围终点对所有模式生效；`prefix_ranges` 只是布局、程序永不改写（各前缀相同时也不再收拢）；resume 与「自动更新 start」都只改全局 `start`。
-- **顺序模式的全局坐标没有贯通**：全局 `start` 以前在顺序模式下按"每个前缀各自从 start 开始"解释，`prefix_ranges` 又各自独立，于是多前缀时无法表达"总量里已经测到哪"。现在按前缀顺序累加成全局坐标：前缀 `p` 占 `[C_p, C_p+total_p)`，`total_p = end-start`（`end=-1` = 该前缀的完整字符集总量），全局 `end=-1` = 所有前缀总量之和；开跑时把全局 `[start,end)` 映射回各前缀的绝对区间（只用于本次任务参数，不写回配置）。resume 先改全局 `start` 再从它开跑，`prefix_ranges` 保持原样。
-- **深色主题切换时抛 `AttributeError`**：`_apply_theme` 直接读 `self.editor`，而它要到第一次打开编辑器才创建——`Monitor.__init__` 阶段就抛异常，导致 Tk 根泄漏、后续窗口 `iconphoto` 全部失败（表现为整批界面测试连锁报错）。
+## 7.0.4（2026-10-29）
 
 ### 新增
 
@@ -36,16 +22,46 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 
 ### 变更
 
-- **测号配置与应用设置分目录**：`config/` 只放**测号配置**（要测什么），新增 `settings/` 放**应用设置**——`build_config.json`（本机编译/调优选择）与 `ui_settings.json`（界面偏好）。发布包布局同步为 `PBB/config/` + `PBB/settings/`，`stage_configs()` 改为"先清后写"，保证两类文件各就各位、不互相残留。旧包把 `build_config.json` 放在 `config/` 下，**仍能读到**（迁移期兼容，`build_settings.legacy_config_path`），但新写入一律进 `settings/`；仓库里的模板移到 `settings/build_config.fresh.json`。
+- **测号配置与应用设置分目录**：`config/` 只放**测号配置**（要测什么），新增 `settings/` 放**应用设置**——`build_config.json`（本机编译/调优选择）与 `ui_settings.json`（界面偏好）。发布包布局同步为 `PBB/config/` + `PBB/settings/`，`stage_configs()` 改为"先清后写"。旧包把 `build_config.json` 放在 `config/` 下仍能读到（迁移期兼容），但新写入一律进 `settings/`；模板移到 `settings/build_config.fresh.json`。
+- **`ui_settings.json` 纳入版本控制并随包发布**：它同时提供「启动默认配置」与**新配置的默认评分阈值**（初始值等于 `config_football.yaml` 的 `collection`）。「编辑新配置」读它填阈值，改这个文件就改默认值。
+- **发布包文件名带版本号**：新增仓库根 `VERSION`，`package_release.py` / `package_offline.py` 产出 `PBB-windows-x64-pure-<版本>.zip` 与 `PBB-windows-x64-environment-<版本>.zip`；缺 `VERSION` 或格式不对直接报错，不再产出没有版本号的文件名。
+- **测号输出移到包根 `out/`**：结果文件、`blue.txt`、续测检查点、线程控制文件都写到 `<包根>/out/`（发布包里就是 `PBB/out/`，与 `source/`、`config/` 同级），不再埋在 `source/out` 或 `PBBMonitor/_internal/out`。CLI 也固定写这里，不跟着启动目录跑；发布包里预置一个空的 `out/` 目录。
+
+### 修复
+
+- **配置选择器打开编辑器再关闭后界面卡死数秒**：`<Destroy>` 会沿 bindtags 冒泡，编辑器里**每一个子控件**销毁都会触发一次收尾回调（足球配置的编辑器有 158 个后代控件），旧代码每次都在 `after(50)` 里做 `grab_set` + 整表重建（重新读取并解析 `config/` 下全部配置、再算字符集大小）。现在只认编辑器顶层本身、每个编辑器只收尾一次；实测关闭后 `refresh` 与 `grab_set` 各 1 次。
+- **测完的配置无法再编辑**：`enumeration.ranges[].end == start` 被「必须 > start」拒绝，而「自动更新 start」测完正好把 start 推到 end。现在空区间合法（`end < start` 仍拒绝），`prefix_ranges` 同样放宽。
+- **前缀名字里带换行会让后面的前缀静默不测**：引擎参数按行/逗号分隔且不转义，前缀名含换行时 `prefixes=` 那一行被截断——现场（`test-shunxu.toml`，3 个前缀）实际只跑了 2 个。根因是**单行输入框里看不见的换行**：往 Tk 的 Entry 粘贴多行文本时，换行/制表符会原样写进 StringVar。现在前后缀名、队伍名、结果文件名的输入框"写入即清洗"（键入、粘贴、代码赋值都覆盖），落盘前再兜一次；校验仍拒绝逗号、换行、回车、制表符与 NUL（手写配置会得到明确报错）。
+- **保存配置会吃掉队伍名的首尾空格**：`_editor_config` 对 `team_name` 做了 `.strip()`。改为原样保存；首尾空格在 YAML/JSON/TOML 三种格式下都能往返。
+- **深色模式下配置选择器表格仍是白底**：`ttk.Treeview` 不跟随 `TFrame`/`TLabel`，现在表格、表头与选中行都按主题着色。
+- **顺序模式的全局区间、start 不生效**：①主窗口「范围终点」以前只对 format 配置生效；②编辑器保存时总会写一份与全局相同的 `prefix_ranges`，把全局区间和「自动更新 start」那条路径盖住；③「自动更新 start」只推进 `ranges`。现在统一为「全局区间是总控制器」：范围终点对所有模式生效；`prefix_ranges` 只是布局、程序永不改写；resume 与「自动更新 start」都只改全局 `start`。
+- **顺序模式的全局坐标没有贯通**：全局 `start` 以前在顺序模式下按"每个前缀各自从 start 开始"解释，`prefix_ranges` 又各自独立，多前缀时无法表达"总量里已经测到哪"。现在按前缀顺序累加成全局坐标：前缀 `p` 占 `[C_p, C_p+total_p)`，`total_p = end-start`（`end=-1` = 该前缀的完整字符集总量），全局 `end=-1` = 所有前缀总量之和；开跑时把全局 `[start,end)` 映射回各前缀的绝对区间（只用于本次任务参数，不写回配置）。resume 先改全局 `start` 再从它开跑。
+- **深色主题切换时抛 `AttributeError`**：`_apply_theme` 直接读 `self.editor`，而它要到第一次打开编辑器才创建——`Monitor.__init__` 阶段就抛异常，导致 Tk 根泄漏、后续窗口 `iconphoto` 全部失败（表现为整批界面测试连锁报错）。
+
+### 文档
+
+- README 补充：前后缀/队伍名的禁用字符、空区间语义、启动默认配置、顺序模式全局区间语义与 `out/` 位置。
+- `docs/PACKAGING.md`：归档名带版本号、`settings/` 与 `out/` 的布局。
+- README、REPO.md、`docs/AUTOTUNE.md` 同步「测号配置在 `config/`、应用设置在 `settings/`」的目录划分。
+
+---
+
+## 7.0.3（2026-10-16 ～ 2026-10-21）
+
+### 修复
+
+- **随包配置写死线程数（tune 在任何机器上都用同一个线程数）**：`pbb_linux/config/` 的 `config.yaml`、`config_football.yaml`、`config86_bc.yaml` 分别写死 `worker_threads` 40/40/12；首发版 `config/config_football.yaml` 也是 40，而发布的 `config.yaml` 由它生成，于是 tune 与正式测号在所有用户机器上都固定同一个线程数——核少的机器过载降频、核多的机器用不满，测速数据也不可与别的机器比较。三份配置改回 `-1`（自动）；新增 `test_bundled_configs_never_hardcode_a_machine_thread_count` 守住该回退。
+- **Linux 版 tune 不解析 `-1`**：`pbb_linux/source/autotune.py` 把配置里的 `n_threads` 原样交给引擎；引擎收到 `-1` 不会创建任何 consumer，而队列只有 4 个槽，producer 填满后永久阻塞——任务卡死。现在 tune 启动时按 `os.cpu_count()` 解析一次并显示实际线程数（与 `main.py` 的口径一致）。
+- **词族配置写死开发机绝对路径**：`config/config_words_sequential.yaml` 的四个 `file:` 写成 `D:\namerena\files\...`，随包到别的机器必然加载失败（`tests/test_distribution_configs.py` 因此失败）。按 `docs/PACKAGING.md` 改回 `../charsets/`。
+- **tune 在性能轮次里把「证明不出来」当成「结果不同」**：`same()` 第 3 层要求用结果文件的分数列证明同分组换名字确实是同分，而性能轮次按配置的 `output_xp=0` 运行、结果文件根本没有分数列——同分并列的 Top5 边界换人时证据必然缺失，旧代码于是判定"有差异"并中止整轮（现场：22 线程机器跑到 pass1_unroll 抛 `UI Top name mismatch`）。现在 `same()` 增加 `require_score_proof` 口径：有反证（查得到且分数不同）两种口径都失败，无证据只在正确性对拍时失败；`paired()` 用宽松口径，候选正确性由 `verify()` 的覆盖任务单独证明。
+
+### 变更
+
 - tune 启动时同时输出本机可用逻辑CPU数；配置显式指定的线程数超过它时打印警告（显式配置仍优先，不代改），并把实际线程数与可用逻辑CPU分别记入 `environment.json`、`selection.json`、`REPORT.md`。
 
 ### 文档
 
 - `docs/AUTOTUNE.md` 补「测量噪声与判定力度」：真实引擎实测的单次测量抖动、开局虚高幅度，以及 `choose()` 在 0%/0.3%/1%/2% 收益上的判定概率；同时说明候选数不足「线程数 × 100 万」时线程跑不满、`speed` 会被低估，以及随包配置为什么必须是 `-1`。
-- README 补充：前后缀/队伍名的禁用字符、空区间语义、启动默认配置的位置与回退顺序。
-- README、REPO.md、`docs/PACKAGING.md`、`docs/AUTOTUNE.md` 同步「测号配置在 `config/`、应用设置在 `settings/`」的目录划分与发布包布局（`PBB/config/` + `PBB/settings/`）。
-
----
 
 ## 7.0.2（2026-10-13 ～ 2026-10-15）
 

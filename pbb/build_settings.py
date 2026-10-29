@@ -43,14 +43,10 @@ def package_root(base):
     #   发布包源码  ：源码在 <包根>/source/，config/ 与 PBBMonitor/、runtime/ 在包根，
     #                 所以 source/ 的上一级才是包根。
     #   冻结的监控器：起点是 PyInstaller 的 <包根>/PBBMonitor/_internal/，需要上浮两层。
-    # 判据统一为"这一级是不是源码根"（有没有 pbb/ 包或 config/），命中即返回。
-    base = Path(base)
-    if base.name == "_internal":
-        # PyInstaller onedir：_internal 的上一级是 PBBMonitor/，再上一级才是包根。
-        return base.parent.parent
-    if base.name == "source" and (base / "pbb").is_dir():
-        return base.parent
-    return base
+    # 判据统一为"这一级是不是源码根"（有没有 pbb/ 包），命中即返回。
+    # 唯一实现放在 paths.package_root()，这里只做转发 —— 两处各写一份会漂移
+    # （out/、settings/ 也都要按同一口径定位）。
+    return paths.package_root(base)
 
 
 def config_root(base):

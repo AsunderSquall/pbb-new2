@@ -871,11 +871,16 @@ def main():
         out_dir = None       # run() 内部创建 TemporaryDirectory, 用完即删
         print(f"[main] Threads: {n}, Mode: {task_config['mode']}, Output: stdout", file=sys.stderr)
     elif output_dest == "both":
-        out_dir = "."
-        print(f"[main] Threads: {n}, Mode: {task_config['mode']}, Output: file+stdout → out/{result_file}", file=sys.stderr)
+        # 结果统一落在包根 out/（发布包就是 PBB/out），不再跟着启动目录跑。
+        out_dir = str(paths.PACKAGE_ROOT)
+        os.makedirs(paths.OUT_DIR, exist_ok=True)
+        print(f"[main] Threads: {n}, Mode: {task_config['mode']}, "
+              f"Output: file+stdout → {paths.OUT_DIR / result_file}", file=sys.stderr)
     else:  # file
-        out_dir = "."
-        print(f"[main] Threads: {n}, Mode: {task_config['mode']}, Output: out/{result_file}", file=sys.stderr)
+        out_dir = str(paths.PACKAGE_ROOT)
+        os.makedirs(paths.OUT_DIR, exist_ok=True)
+        print(f"[main] Threads: {n}, Mode: {task_config['mode']}, "
+              f"Output: {paths.OUT_DIR / result_file}", file=sys.stderr)
 
     t0 = time.time()
     try:

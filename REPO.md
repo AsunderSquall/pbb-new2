@@ -35,7 +35,9 @@
 ├── assets/                      icon.ico / icon.png / icon_taskbar.png
 ├── fonts/                       SarasaMonoSC-Regular.ttf
 ├── config/                      测号配置：config_football.yaml、config.example.*
-├── settings/                    应用设置：build_config.fresh.json（模板）、ui_settings.json
+├── settings/                    应用设置：build_config.fresh.json（模板）、ui_settings.json（提交）
+├── out/                         测号输出（结果/blue.txt/检查点，已忽略）
+├── VERSION                      发布版本号（打包时拼进归档名）
 ├── offline/                     发布包根目录模板（README/ENVIRONMENT.md + 8 个脚本）
 ├── build/                       编译产物（首次构建时生成，已忽略）
 └── _release_artifacts_20261010/ 旧发布布局归档（已忽略，见 §5）
@@ -303,7 +305,9 @@ windowed 构建（`console=False`）的 bootloader 会丢弃 stdout/stderr，崩
 | `assets/`、`fonts/` | **提交** | 图标与字体（`tools/PBBMonitor.spec` 收集） |
 | `config/config_football.yaml`、`config.example.*` | **提交** | 生产门控、示例 |
 | `settings/build_config.fresh.json` | **提交** | 未测试的构建选项模板（对应 `build_settings.fresh()`） |
-| `config/config.yaml`、`settings/build_config.json`、`settings/ui_settings.json`、`config/sby.toml` | **忽略** | 生成物 / 本机状态 / 界面偏好 / 个人配置 |
+| `settings/ui_settings.json` | **提交** | 启动默认配置 + 新配置的默认评分阈值，随包发布 |
+| `VERSION` | **提交** | 发布版本号；归档名以 `-<版本号>` 结尾 |
+| `config/config.yaml`、`settings/build_config.json`、`config/sby.toml` | **忽略** | 生成物 / 本机状态 / 个人配置 |
 | `build/**`（含 `build/autotune/**`） | **忽略** | `pbb/paths.py` 的 `BUILD_DIR` |
 | `PBBMonitor/**`、`runtime/**` | **忽略** | 只在发布时由打包脚本生成 |
 | `release/`、`dist_releases/`、`release_build/`、`release_stage/` | **忽略** | 打包中间产物与 zip |

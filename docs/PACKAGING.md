@@ -11,13 +11,16 @@ The Python extension remains the conservative release build. A compiler is not
 required for normal use of the executable package.
 
 The pure ZIP contains PBBMonitor/, source/, config/ (search configs),
-settings/ (build choice and UI preferences) and launchers; source/build/
-contains the portable ordinary/UI engines and Python core. The independent
+settings/ (build choice and UI preferences), out/ (empty result folder) and
+launchers; source/build/ contains the portable ordinary/UI engines and Python
+core. Search output goes to the package-level out/, not inside source/: after
+extracting, results appear as PBB/out/<result file>.
+The independent
 environment ZIP contains only runtime/ (complete Python and GCC), licenses and
 README_ENVIRONMENT.md. It is a reusable component, not a delta or an application
 bundle. Existing environment users only update pure; new full-feature users
 extract both ZIPs into the same parent directory, merging their PBB/ folders.
-runtime/, source/, config/, settings/ and PBBMonitor/ must be siblings. Users with a compiler
+runtime/, source/, config/, settings/, out/ and PBBMonitor/ must be siblings. Users with a compiler
 are strongly encouraged to Rebuild once on their own machine for performance.
 The pure package also includes charsets/ beside config/. The supplied
 config_words_sequential.yaml references these four word lists with ../charsets/;
@@ -50,8 +53,16 @@ python package_release.py
 ```
 
 Run `python package_offline.py` to produce both independent components and verify
-the merged layout with the bundled Python/compiler. Archive names are
-PBB-windows-x64-pure.zip and PBB-windows-x64-environment.zip.
+the merged layout with the bundled Python/compiler. **Archive names end with the
+version number**: PBB-windows-x64-pure-<version>.zip and
+PBB-windows-x64-environment-<version>.zip, where <version> is read from the
+repository-root `VERSION` file (e.g. `7.0.4`). Bump `VERSION` when releasing; the
+packager refuses to build if the file is missing or not `X.Y.Z`.
+
+`settings/ui_settings.json` is version-controlled and shipped in the package: it
+holds the default startup config and the default scoring thresholds used by
+"new config". `settings/build_config.json` is always rewritten to the untested
+defaults when packaging.
 
 PBB_BUILD_MODE=portable requests the conservative build mode and forbids
 PBB_CXXFLAGS overrides. Normal builds default to PBB_BUILD_MODE=native.

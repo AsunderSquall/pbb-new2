@@ -157,6 +157,9 @@ README.pdf
 
 # 放行：未测试的构建选项模板（对应 build_settings.fresh()）
 !settings/build_config.fresh.json
+# 放行：界面设置（启动默认配置 + 新配置的默认评分阈值）。它要随包发布，
+# 所以必须被版本控制跟踪；本机运行产生的改动由发布流程覆盖。
+!settings/ui_settings.json
 
 # 放行：必须纳入版本控制的生成物参考
 #   environment.json             tools/package_offline.py 写进 environment 包

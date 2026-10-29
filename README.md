@@ -44,17 +44,19 @@ PBB/
 ├── README.md / README.pdf        完整说明
 ├── 先读我.md / 先读我.pdf        极简说明
 ├── PACKAGING.md                  构建和发布说明
-├── config/                      共用的可编辑配置
+├── config/                      测号配置（要测什么）
 │   ├── config.yaml              外层 CLI 默认使用的配置
 │   ├── config_football.yaml      足球配置
-│   ├── config.example.*          YAML/JSON/TOML 示例
-│   └── build_config.json         本机优化选择，初始未测试
+│   └── config.example.*          YAML/JSON/TOML 示例
+├── settings/                    应用设置（程序自己的选择/偏好，随包发布）
+│   ├── build_config.json         本机优化选择，初始未测试
+│   └── ui_settings.json          启动默认配置 + 新配置的默认评分阈值
+├── out/                         测号输出（结果/blue.txt/续测检查点），与 source 同级
 ├── PBBMonitor/
 │   ├── PBBMonitor.exe            预编译监控器
 │   └── _internal/                监控器依赖、源码和运行资源
 │       ├── build/                UI 引擎、Python 模块及清单
-│       ├── src/                  随监控器提供的 C++ 源码
-│       └── out/                  图形监控器输出，运行后生成
+│       └── src/                  随监控器提供的 C++ 源码
 ├── source/                      可独立运行的项目源码
 │   ├── main.py / ui.py           CLI / 源码 UI
 │   ├── build.py                  编译与二进制清单检查
@@ -80,13 +82,12 @@ PBB/
 │   └── mingw64/                 GCC 工具链
 ├── README_ENVIRONMENT.md         environment 放置说明
 ├── THIRD_PARTY_ENVIRONMENT.md    环境许可说明
-├── environment.json             环境组件信息
-└── out/                         外层 start_cli 输出，运行后生成
+└── environment.json             环境组件信息
 ```
 
-外层的两个测试脚本转到 `source/` 的对应脚本执行。图形监控器使用 `_internal/build/` 中的 UI 引擎，外层 CLI 使用 `source/build/` 中的普通引擎。它们共用外层配置，但结果目录不同。
+外层的两个测试脚本转到 `source/` 的对应脚本执行。图形监控器使用 `_internal/build/` 中的 UI 引擎，外层 CLI 使用 `source/build/` 中的普通引擎。它们共用外层配置，**输出也统一写到外层的 `out/`**。
 
-直接从 `source/` 运行 `python ui.py` 时，源码 UI 使用 `source/build/` 和 `source/out/`；直接运行 CLI 时，结果写到启动命令的当前目录下的 `out/`。因此查找结果时应确认使用了哪个入口。
+结果不再跟着入口走：无论是监控器、源码 UI 还是 CLI，结果文件、`blue.txt`、续测检查点与线程控制文件都落在**包根 `out/`**（开发仓库里就是仓库根的 `out/`）。找不到结果时先看这里的 `out/`。
 
 ## 源码结构与计算路径
 
@@ -129,6 +130,8 @@ src/
 - `threads.worker_threads`：启动线程数，`-1` 表示自动检测逻辑 CPU 数。
 
 配置选择器里有「设为启动默认」：把当前选中配置的文件名记进 `settings/ui_settings.json`，之后打开界面就直接加载它；文件不存在时按 `config.yaml` → `config_football.yaml` → 第一个可用配置的顺序回退。
+
+`settings/ui_settings.json` 的 `collection` 段是**新配置的默认评分阈值**（初始值等于 `config_football.yaml` 的 collection）；「编辑新配置」用它填阈值。这份文件随版本控制并随发布包发布，改它就改了默认值。
 
 **两类文件分开放**：`config/` 只放**测号配置**（要测什么：队伍、前后缀、字符集、枚举范围、阈值……）；`settings/` 放**应用设置**——`build_config.json`（本机编译/调优选择）与 `ui_settings.json`（界面偏好）。旧包装把 `build_config.json` 放在 `config/` 下，仍然读得到，但新写入一律进 `settings/`。
 

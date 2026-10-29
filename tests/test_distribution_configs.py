@@ -81,5 +81,36 @@ class DistributionConfigTests(unittest.TestCase):
                 self.assertEqual((outer/'charsets'/name).read_bytes(),data)
             self.assertEqual((outer/'config/config_words_sequential.yaml').read_bytes(),configs['config_words_sequential.yaml'])
 
+    def test_ui_settings_is_shipped_with_the_football_thresholds(self):
+        """ui_settings.json 要随包发布：启动默认配置 + 新配置的默认阈值。"""
+        import yaml
+        settings = package_release.distribution_settings()
+        shipped = json.loads(settings['ui_settings.json'])
+        football = yaml.safe_load(
+            (Path(package_release.ROOT) / 'config/config_football.yaml').read_text(encoding='utf8'))
+        self.assertEqual(shipped['collection'], football['collection'])
+        self.assertEqual(shipped['default_config'], 'config_football.yaml')
+
+    def test_release_archive_names_end_with_the_version(self):
+        """归档名必须以 -<版本号> 结尾，版本号来自仓库根 VERSION。"""
+        import re
+        version = package_release.release_version()
+        self.assertRegex(version, r'^\d+\.\d+\.\d+$')
+        self.assertEqual(version, (Path(package_release.ROOT) / 'VERSION').read_text(encoding='utf8').strip())
+        for prefix in ('PBB-windows-x64-pure', 'PBB-windows-x64-environment'):
+            name = f'{prefix}-{version}.zip'
+            self.assertTrue(re.fullmatch(rf'{re.escape(prefix)}-\d+\.\d+\.\d+\.zip', name))
+
+    def test_bad_version_is_refused(self):
+        with tempfile.TemporaryDirectory(dir=paths.BUILD_DIR) as directory:
+            root = Path(directory)
+            from unittest.mock import patch
+            with patch.object(package_release, 'ROOT', root):
+                with self.assertRaises(SystemExit):
+                    package_release.release_version()          # 缺文件
+                (root / 'VERSION').write_text('7.0\n', encoding='utf8')
+                with self.assertRaises(SystemExit):
+                    package_release.release_version()          # 格式不对
+
 
 if __name__=='__main__':unittest.main()

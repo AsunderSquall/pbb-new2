@@ -49,12 +49,36 @@ REPO_ROOT = _find_repo_root()
 #   PyInstaller 冻结   → _internal/（spec 把 fonts、assets、build 都收集到这里）
 DATA_ROOT = _SELF if _FROZEN else REPO_ROOT
 
+
+def package_root(base=None) -> Path:
+    """外层包根：``config/``、``settings/``、``out/``、``runtime/`` 所在的那一级。
+
+    三种起点都要能识别（与 ``build_settings.package_root`` 同一口径，这里给出唯一实现）：
+      开发仓库      ：数据根本身就是包根；
+      发布包源码    ：源码在 ``<包根>/source``，需要上浮一级；
+      冻结的监控器  ：``<包根>/PBBMonitor/_internal``，需要上浮两级。
+    判据是"这一级是不是源码根"（有没有 ``pbb`` 包），避免把普通目录误判成包根。
+    """
+    base = Path(base) if base is not None else DATA_ROOT
+    if base.name == "_internal":
+        return base.parent.parent
+    if base.name == "source" and (base / "pbb").is_dir():
+        return base.parent
+    return base
+
+
+PACKAGE_ROOT = package_root(DATA_ROOT)
+
 # ── 标准子目录（开发仓库与发布包布局；冻结布局与之同名，都在 DATA_ROOT 下） ──
 BUILD_DIR = DATA_ROOT / "build"          # 编译产物：引擎、pbb_core、autotune 记录
 FONTS_DIR = DATA_ROOT / "fonts"
 ASSETS_DIR = DATA_ROOT / "assets"
 CONFIG_DIR = DATA_ROOT / "config"        # 测号配置（要测什么）
 SETTINGS_DIR = DATA_ROOT / "settings"    # 应用设置：build_config.json / ui_settings.json
+# 测号输出的落点：**包根的 out/**（而不是 source/out 或 PBBMonitor/_internal/out）。
+# 结果文件、blue.txt、续测检查点、运行中线程控制文件都在这里；引擎的工作目录是
+# 它的上一级，因为引擎内部会自己拼 "out/<结果文件>"。
+OUT_DIR = PACKAGE_ROOT / "out"
 NATIVE_DIR = PACKAGE_DIR / "native"      # C++ 源码：engine_main.cpp、filter 对拍、src/
 
 # 默认头文件树（PBB_SRC_DIR 为空时的选择）与默认桥接源码。

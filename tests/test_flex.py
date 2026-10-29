@@ -169,7 +169,7 @@ class FlexConfigTests(unittest.TestCase):
                 window._run_origin=cfg;window._run_config_path=str(path)
                 window._run_result_file='r';window._run_processed=0
                 window._run_start_updated=False;window.auto_start_var.set(True)
-                with patch.object(ui,'ROOT',directory):window._advance_config_start()
+                with patch.object(ui,'RESULT_ROOT',directory):window._advance_config_start()
                 updated=ui.load_config(str(path))
                 # 只改全局 start；这份配置本来没有 prefix_ranges，不应凭空出现一份。
                 self.assertEqual(updated['enumeration']['ranges'][0]['start'],12)

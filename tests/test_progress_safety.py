@@ -40,7 +40,7 @@ def fixture(directory):
 
 class ProgressSafetyTests(unittest.TestCase):
     def test_periodic_contiguous_frontier_and_final_save(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'ROOT', directory):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'RESULT_ROOT', directory):
             owner, path, checkpoint, header = fixture(directory)
             ui.Monitor._periodic_progress_save(owner)
             self.assertEqual(ui.load_config(str(path))['enumeration']['ranges'][0]['start'], 12345)
@@ -56,7 +56,7 @@ class ProgressSafetyTests(unittest.TestCase):
 
     def test_disabled_legacy_and_random_do_not_periodically_advance(self):
         for kind in ('disabled', 'legacy', 'random'):
-            with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'ROOT', directory):
+            with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'RESULT_ROOT', directory):
                 owner, path, _, _ = fixture(directory)
                 before = path.read_bytes()
                 if kind == 'disabled': owner.auto_start_var.get = lambda: False
@@ -66,7 +66,7 @@ class ProgressSafetyTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), before)
 
     def test_failed_save_retries_and_manual_edits_survive(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'ROOT', directory):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'RESULT_ROOT', directory):
             owner, path, _, _ = fixture(directory)
             with patch.object(ui, 'save_config', side_effect=OSError('injected disk error')):
                 owner._advance_config_start()
@@ -93,7 +93,7 @@ class ProgressSafetyTests(unittest.TestCase):
 import sys,time
 sys.path.insert(0,'tests')
 from test_progress_safety import fixture,ui
-ui.ROOT=sys.argv[1]
+ui.RESULT_ROOT=sys.argv[1]
 owner,*_=fixture(sys.argv[1])
 ui.Monitor._periodic_progress_save(owner)
 print('ready',flush=True)
@@ -122,7 +122,7 @@ ui.save_config(Path(sys.argv[1])/'config.json',{'start':999})
     def test_real_windows_session_messages_on_test_window(self):
         from pbb.session_guard import SessionGuard
         from ctypes import wintypes
-        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'ROOT', directory):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'RESULT_ROOT', directory):
             owner, path, checkpoint, header = fixture(directory)
             window = ui.tk.Tk(); window.withdraw()
             guard = SessionGuard(window, lambda: ui.Monitor._save_session_progress(owner))

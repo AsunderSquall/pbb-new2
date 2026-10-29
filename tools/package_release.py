@@ -90,6 +90,22 @@ def check_inputs():
               "pbb/, tools/, fonts/, assets/, offline/, docs/ and config/ live here.")
 
 
+def release_version() -> str:
+    """读取仓库根的 ``VERSION``（发布包文件名带版本号，格式 ``-<版本号>``）。
+
+    **为什么要单独一个文件**：打包脚本、离线包、文档都要用同一个版本号；从 changelog
+    或 git 里猜版本号既不可靠也不好验证。缺文件或内容不合法时直接报错，避免打出
+    名字里没有版本号的包（历史产物就有这个问题：pure.zip 与 pure-7.0.1.zip 混在一起）。
+    """
+    path = ROOT / 'VERSION'
+    if not path.is_file():
+        raise SystemExit(f'Missing {path}: the release archive name must end with -<version>')
+    version = path.read_text(encoding='utf-8').strip()
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        raise SystemExit(f'Invalid version in {path}: {version!r} (expected e.g. 7.0.4)')
+    return version
+
+
 def distribution_configs():
     """生成发布包 config/ 目录里的全部**测号配置**（名称 → 字节内容）。"""
     config_dir = build_settings.config_root(ROOT)
@@ -107,10 +123,26 @@ def distribution_configs():
 def distribution_settings():
     """生成发布包 settings/ 目录的内容。
 
-    只带一份「未测试」的 build_config.json：本机那份可能带着测速结论，那种结论绝不能
-    带到别的 CPU 上；ui_settings.json 是用户自己的偏好，不在发布包里预置。
+    * ``build_config.json`` 一律换成「未测试」的默认值：本机那份可能带着测速结论，
+      那种结论绝不能带到别的 CPU 上。
+    * ``ui_settings.json`` **随包带出**（仓库里那正是被版本控制的默认值）：它决定
+      启动默认配置和新配置的默认评分阈值。仓库里缺这份文件时，用足球配置的
+      collection 现生成一份，保证包里一定有。
     """
-    return {'build_config.json': (json.dumps(build_settings.fresh(), indent=2) + '\n').encode()}
+    settings = {'build_config.json': (json.dumps(build_settings.fresh(), indent=2) + '\n').encode()}
+    ui_settings = build_settings.settings_root(ROOT) / 'ui_settings.json'
+    if ui_settings.is_file():
+        settings['ui_settings.json'] = ui_settings.read_bytes()
+    else:
+        config_dir = build_settings.config_root(ROOT)
+        football = config_dir / 'config_football.yaml'
+        if not football.is_file():
+            raise SystemExit(f'Missing {football}: cannot derive ui_settings.json defaults')
+        import yaml
+        payload = {'default_config': 'config_football.yaml',
+                   'collection': (yaml.safe_load(football.read_text(encoding='utf8')) or {}).get('collection', {})}
+        settings['ui_settings.json'] = (json.dumps(payload, ensure_ascii=False, indent=2) + '\n').encode()
+    return settings
 
 
 def stage_configs(root):
@@ -321,6 +353,9 @@ def main():
             archive.writestr('PBB/settings/' + name, data)
         for name, data in distribution_charsets().items():
             archive.writestr('PBB/charsets/' + name, data)
+        # 测号输出直接落在包根 out/（与 source/、config/ 同级），解包即可看到；
+        # zip 里显式写一个目录项，否则用户要等第一次跑完才会出现这个文件夹。
+        archive.writestr('PBB/out/', b'')
         # 发布包根目录的外壳脚本（start_ui/start_cli/rebuild/environment/tune_*）。
         for path in Path('offline').glob('*.bat'):
             archive.write(path, 'PBB/' + path.name)
@@ -330,7 +365,8 @@ def main():
                 path = paths.BUILD_DIR / (name + suffix)
                 archive.write(path, 'PBB/source/build/' + path.name)
 
-    archive_path = write_zip_atomic(release / "PBB-windows-x64-pure.zip", fill)
+    archive_path = write_zip_atomic(
+        release / f"PBB-windows-x64-pure-{release_version()}.zip", fill)
     # 记录本次 dist 目录，供 package_offline.py 复用（run_ui.bat 也会读）。
     (paths.BUILD_DIR / "ui_dist.txt").write_text(DIST_DIR, encoding="ascii")
     print("Pure archive:", archive_path.resolve())

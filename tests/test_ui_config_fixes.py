@@ -132,7 +132,10 @@ class DefaultConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             (Path(temp) / 'real.yaml').write_text('x', encoding='utf8')
             (Path(temp) / 'config.yaml').write_text('fallback', encoding='utf8')
-            with patch.object(ui, 'CONFIG_DIR', temp), \
+            # 设置文件在 SETTINGS_DIR，测号配置在 CONFIG_DIR —— 两个都要指到临时目录，
+            # 否则测试会改写仓库里真实的 settings/ui_settings.json。
+            with patch.object(ui, 'SETTINGS_DIR', os.path.join(temp, 'settings')), \
+                 patch.object(ui, 'CONFIG_DIR', temp), \
                  patch.object(ui, 'load_config', side_effect=lambda path: {'ok': True}), \
                  patch.object(ui.ConfigSelector, 'is_search_config', staticmethod(lambda cfg: True)):
                 ui.save_ui_settings({'default_config': 'real.yaml'})
@@ -142,11 +145,49 @@ class DefaultConfigTests(unittest.TestCase):
                 self.assertEqual(os.path.basename(ui.default_config_path()), 'config.yaml')
 
     def test_ui_settings_round_trip_and_corrupt_file_is_ignored(self):
-        with tempfile.TemporaryDirectory() as temp, patch.object(ui, 'CONFIG_DIR', temp):
-            ui.save_ui_settings({'default_config': 'a.yaml', 'other': 1})
-            self.assertEqual(ui.load_ui_settings(), {'default_config': 'a.yaml', 'other': 1})
-            Path(ui.ui_settings_path()).write_text('{ not json', encoding='utf8')
-            self.assertEqual(ui.load_ui_settings(), {})
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(ui, 'SETTINGS_DIR', os.path.join(temp, 'settings')):
+                ui.save_ui_settings({'default_config': 'a.yaml', 'other': 1})
+                self.assertEqual(ui.load_ui_settings(), {'default_config': 'a.yaml', 'other': 1})
+                Path(ui.ui_settings_path()).write_text('{ not json', encoding='utf8')
+                self.assertEqual(ui.load_ui_settings(), {})
+
+
+class DefaultThresholdsTests(unittest.TestCase):
+    """「编辑新配置」的默认评分阈值来自 settings/ui_settings.json。"""
+
+    def test_blank_config_uses_ui_settings_collection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(ui, 'SETTINGS_DIR', os.path.join(temp, 'settings')):
+                ui.save_ui_settings({'collection': {'min_qp': 1234, 'ptt_cp': 5678, 'score_list': 'qp'}})
+                cfg = ui.blank_config()
+                self.assertEqual(cfg['collection']['min_qp'], 1234)
+                self.assertEqual(cfg['collection']['ptt_cp'], 5678)
+                self.assertEqual(cfg['collection']['score_list'], 'qp')
+
+    def test_repository_ui_settings_match_the_football_config(self):
+        """仓库里的 ui_settings.json 必须就是足球配置的阈值（随包默认值）。"""
+        import yaml
+        football = yaml.safe_load(
+            (Path(ui.CONFIG_DIR) / 'config_football.yaml').read_text(encoding='utf8'))
+        shipped = json.loads((Path(ui.SETTINGS_DIR) / 'ui_settings.json').read_text(encoding='utf8'))
+        self.assertEqual(shipped.get('collection'), football['collection'])
+
+
+class OutputDirectoryTests(unittest.TestCase):
+    """测号输出落在包根 out/，不再埋进 source/ 或 PBBMonitor/_internal/。"""
+
+    def test_out_dir_is_the_package_root_out(self):
+        from pbb import paths
+        self.assertEqual(paths.OUT_DIR, paths.PACKAGE_ROOT / 'out')
+        self.assertEqual(paths.OUT_DIR.name, 'out')
+        self.assertEqual(ui.OUT_DIR, str(paths.OUT_DIR))
+        self.assertEqual(ui.RESULT_ROOT, str(paths.PACKAGE_ROOT))
+
+    def test_thread_control_file_lands_in_the_package_out(self):
+        from pbb import paths
+        self.assertEqual(ui.Monitor._thread_control_path(),
+                         os.path.join(str(paths.OUT_DIR), '.threads'))
 
 
 class WhitespaceRoundTripTests(unittest.TestCase):
