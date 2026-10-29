@@ -38,7 +38,10 @@ The development repository root is the packaging root: main.py, build.py, ui.py,
 src/, fonts/, offline/ and config/ sit directly in it, with no extra source/ layer.
 package_release.py chdirs to that root and reads every input relative to it, so run
 the packagers from the repository root. README.pdf and 先读我.pdf are external
-release inputs: export them from the Markdown files before packaging (see REPO.md).
+release inputs: regenerate them from the Markdown files with
+`python tools/make_pdfs.py` before packaging. That script converts with pandoc and
+prints to PDF with headless Chrome/Edge, so no LaTeX installation is required
+(only pandoc plus a Chromium-based browser).
 
 Rebuild uses the native build mode by default. GCC uses -march=native;
 MSVC chooses SIMD only after CPU and operating-system checks. Intel icpx is

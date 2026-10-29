@@ -46,11 +46,12 @@ DOCS_DIR = "docs"
 # 两者都直接进入发布包顶层（PBB/README.md、PBB/先读我.md 及其 PDF）。
 PDF_SOURCES = (("README.md", "README.pdf"),
                ("先读我.md", "先读我.pdf"))
-# PDF 不由本仓库生成，缺失时给出可直接照做的导出命令。
-PDF_HINT = ('Export it with a Markdown-to-PDF tool and keep it at the repository root, e.g.\n'
+# PDF 由 tools/make_pdfs.py 生成（pandoc → HTML → Chromium 打印），缺失时给出命令。
+PDF_HINT = ('Regenerate it from the Markdown source, then run the packager again:\n'
+            '  python tools/make_pdfs.py        # pandoc + headless Chrome/Edge, no LaTeX needed\n'
+            'Fallback if you have a LaTeX engine installed:\n'
             '  pandoc "{source}" -o "{pdf}" --pdf-engine=xelatex -V CJKmainfont="Sarasa Mono SC"\n'
-            '  npx md-to-pdf "{source}"     # needs a CJK-capable font for the Chinese text\n'
-            '  python -m markdown_pdf "{source}" -o "{pdf}"')
+            '  npx md-to-pdf "{source}"         # needs a CJK-capable font for the Chinese text')
 # 图标资源目录（pbb/ui.py 与 tools/PBBMonitor.spec 都从这里取）。
 ASSETS_DIR = "assets"
 SPEC_FILE = "tools/PBBMonitor.spec"

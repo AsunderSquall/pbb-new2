@@ -1140,7 +1140,7 @@ class Monitor(tk.Tk):
         self.apply_threads_button.grid(row=5, column=1, sticky="ew", padx=(6, 0))
         ttk.Label(controls, text="0 = 暂停计算；回车或点“应用”生效",
                   font=(UI_FONT, 9)).grid(row=6, column=0, columnspan=2, sticky="w")
-        ttk.Label(controls, text="结束范围").grid(row=7, column=0, sticky="w", pady=(10, 2))
+        ttk.Label(controls, text="预测总量").grid(row=7, column=0, sticky="w", pady=(10, 2))
         ttk.Entry(controls, textvariable=self.range_var).grid(row=8, column=0, columnspan=2, sticky="ew")
         ttk.Label(controls, text="结果文件").grid(row=9, column=0, sticky="w", pady=(10, 2))
         self._build_main_result_file(controls)
@@ -1965,15 +1965,22 @@ class Monitor(tk.Tk):
             row["end"].set(end)
 
     def _refresh_prefix_range_state(self, _event=None):
+        """按枚举模式启用/禁用区间输入框。
+
+        顺序模式下**全局区间是总控制器**（已测数量 + 预测总量），必须可编辑；前缀区间
+        只是布局，也允许编辑（但程序自己不会改它们）。随机模式用不到前缀区间，禁掉。
+        """
         is_sequential = self.editor_choice_maps["enumeration.mode"][self.editor_vars["enumeration.mode"].get()] == 1
+        # 全局区间在任何模式下都生效（顺序模式下更是唯一的总控制器），永远可编辑。
         for widget in self.global_range_widgets:
-            widget.state(["disabled"] if is_sequential else ["!disabled"])
+            widget.state(["!disabled"])
         for widget in self.prefix_batch_widgets:
             widget.state(["!disabled"] if is_sequential else ["disabled"])
         for row in self.prefix_rows + self.pair_rows:
             for widget in row["range_widgets"]:
                 widget.state(["!disabled"] if is_sequential else ["disabled"])
-        self.global_range_section.configure(text="全局区间（随机模式使用）" if not is_sequential else "全局区间（顺序模式不使用）")
+        self.global_range_section.configure(
+            text="全局区间（顺序模式：总控制器）" if is_sequential else "全局区间")
 
     def _open_editor(self):
         """打开配置编辑器窗口（同一个实例只开一个，重复点击只是置顶）。
@@ -2176,9 +2183,16 @@ class Monitor(tk.Tk):
         view_box.bind("<<ComboboxSelected>>", self._switch_affix_view)
         self.global_range_section = ttk.LabelFrame(affixes, padding=10)
         self.global_range_section.pack(fill="x", pady=(0, 12))
-        global_start = field(self.global_range_section, 0, "范围开始", "range.start", rng.get("start", 0), width=18)
-        global_end = field(self.global_range_section, 0, "范围结束", "range.end", rng.get("end", -1), column=1, width=18)
+        global_start = field(self.global_range_section, 0, "已测数量", "range.start", rng.get("start", 0), width=18)
+        global_end = field(self.global_range_section, 0, "预测总量", "range.end", rng.get("end", -1), column=1, width=18)
         self.global_range_widgets = (global_start, global_end)
+        # 一行说明，避免"已测数量/预测总量"被当成随机模式的编号区间：
+        # 顺序模式下它们是**全局坐标**（所有前缀累加），-1 = 全部前缀的总量。
+        ttk.Label(self.global_range_section,
+                  text="已测数量 = 总量里已经测过多少、从哪开始；预测总量 = 总量上界（-1 = 所有前缀总量之和）。"
+                       "前缀区间只是布局，程序不会改它。",
+                  font=(UI_FONT, 9), justify="left", wraplength=pixels(760)
+                  ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         self.separate_affix_sections = ttk.Frame(affixes)
         self.separate_affix_sections.pack(fill="both", expand=True)
@@ -2780,12 +2794,12 @@ class Monitor(tk.Tk):
         self.editor = None
 
     def _apply_range_end(self, cfg: dict) -> None:
-        """把主窗口「范围终点」这一格落到**全局**区间上（所有模式都生效）。
+        """把主窗口「预测总量」这一格落到**全局**区间上（所有模式都生效）。
 
         全局区间是唯一的总控制器（见 pbb/sequential.py）：顺序模式下它表示"所有前缀
         总量"的坐标上界，`-1` = 全部。**前缀区间一个字都不动** —— 它们只是布局。
 
-        以前这里只对 format 配置生效，普通/顺序配置在界面上改「范围终点」毫无作用；
+        以前这里只对 format 配置生效，普通/顺序配置在界面上改「预测总量」毫无作用；
         上一版还会把"每个前缀都一样"的 prefix_ranges 收成全局区间，同样违反"绝不修改
         前缀区间"的约定，这次一并去掉。
         """
@@ -2798,13 +2812,13 @@ class Monitor(tk.Tk):
         ranges = en.get("ranges") or [{"start": 0, "end": -1}]
         en["ranges"] = ranges
         ranges[0]["end"] = end
-        self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，范围终点这一格不生效")
+        self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，预测总量这一格不生效")
 
     def _start(self):
         """校验界面输入并启动一次测号任务（图形监控器入口）。
 
         流程：读配置 → 校验 → 可选续测 → 组装 task → 锁定启动参数 → 交给后台线程。
-        这里只做「启动瞬间」的参数拍板：启动线程、范围终点、结果文件取自界面，
+        这里只做「启动瞬间」的参数拍板：启动线程、预测总量、结果文件取自界面，
         之后就锁住不再允许改（活跃线程仍可在运行中调整，见 _apply_runtime_threads）。
         任何异常都弹窗提示且不进入运行态。
         """

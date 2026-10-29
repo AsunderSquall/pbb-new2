@@ -19,6 +19,7 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 
 - **启动默认配置**：配置选择器的「设为启动默认」把选中文件名写进 `settings/ui_settings.json`，打开界面即加载它；文件缺失时按 `config.yaml` → `config_football.yaml` → 第一个可用配置回退。
 - **保存后的确认弹窗**：编辑配置保存后提示已保存，两个按钮「继续编辑」/「退出编辑」（关闭窗口或 Esc 视为继续编辑，避免误关编辑现场）。
+- **PDF 导出固定成脚本**（`tools/make_pdfs.py`）：pandoc 把 Markdown 转成单文件 HTML（微软雅黑、A4、表格/代码块分页样式），再用 Chromium（Chrome/Edge）无头 `--print-to-pdf` 出 PDF。选这条路是因为本机没有 LaTeX 引擎，`pandoc --pdf-engine=xelatex` 直接失败；发布前跑一次脚本即可。`README.pdf`、`先读我.pdf` 已按新说明重新生成（`REPO.md` 的「缺口 1」随之关闭）。
 
 ### 变更
 
@@ -26,6 +27,7 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 - **`ui_settings.json` 纳入版本控制并随包发布**：它同时提供「启动默认配置」与**新配置的默认评分阈值**（初始值等于 `config_football.yaml` 的 `collection`）。「编辑新配置」读它填阈值，改这个文件就改默认值。
 - **发布包文件名带版本号**：新增仓库根 `VERSION`，`package_release.py` / `package_offline.py` 产出 `PBB-windows-x64-pure-<版本>.zip` 与 `PBB-windows-x64-environment-<版本>.zip`；缺 `VERSION` 或格式不对直接报错，不再产出没有版本号的文件名。
 - **测号输出移到包根 `out/`**：结果文件、`blue.txt`、续测检查点、线程控制文件都写到 `<包根>/out/`（发布包里就是 `PBB/out/`，与 `source/`、`config/` 同级），不再埋在 `source/out` 或 `PBBMonitor/_internal/out`。CLI 也固定写这里，不跟着启动目录跑；发布包里预置一个空的 `out/` 目录。
+- **全局区间的界面口径**：配置编辑器里的全局区间在顺序模式下**不再禁用**（它是总控制器），分区标题随模式显示「顺序模式：总控制器」；「范围开始/范围结束」改名为**「已测数量/预测总量」**（主窗口侧栏的「结束范围」同步改为「预测总量」），并在下方加一行说明：已测数量=总量里测过多少，预测总量=总量上界（`-1`=所有前缀总量之和），前缀区间只是布局、程序不会改。
 
 ### 修复
 

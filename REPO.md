@@ -367,10 +367,13 @@ environment 包 5/5 就位（`runtime/python`、`runtime/mingw64`、许可与元
 
 ## 8. 尚未解决的缺口
 
-### 缺口 1：PDF 生成工具未固定
+### 缺口 1：PDF 生成工具未固定（2026-10-29 已解决）
 
-`tools/package_release.py` 在 PDF 缺失时给出可操作提示，但导出工具链本身未固定
-（用哪个工具、什么字体、CI 是否需要装 xelatex）。建议选定一种后补进 `docs/PACKAGING.md`。
+`tools/make_pdfs.py` 固定了导出链：**pandoc → 单文件 HTML → Chromium 无头打印**。
+选这条路是因为本机没有 LaTeX 引擎（`pandoc --pdf-engine=xelatex` 直接失败），而
+Chrome/Edge 在 Windows 上总是可用。字体用系统自带的微软雅黑，A4 页边距、表格细边框、
+代码块不跨页都由脚本里的 CSS 控制。发布前跑 `python tools/make_pdfs.py` 即可；生成的
+`README.pdf` / `先读我.pdf` 仍是发布输入（本身不进版本控制）。
 
 ### 缺口 2：没有 `LICENSE`
 
