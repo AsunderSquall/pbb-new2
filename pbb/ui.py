@@ -207,6 +207,71 @@ def save_config(path, cfg):
         if temporary.exists():temporary.unlink()
 
 
+# 界面自己的设置（与测号配置分开：它不是测号参数，也不该出现在配置选择器的表格里）。
+# 现在只存「启动时默认加载哪个配置」，以后加界面偏好也放这里。
+UI_SETTINGS_NAME = "ui_settings.json"
+
+
+def ui_settings_path() -> str:
+    """界面设置文件路径（config/ 下，与配置文件同目录方便随包迁移）。"""
+    return os.path.join(CONFIG_DIR, UI_SETTINGS_NAME)
+
+
+def load_ui_settings() -> dict:
+    """读取界面设置；文件缺失或损坏时返回空字典（不影响界面启动）。"""
+    path = ui_settings_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            value = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def save_ui_settings(values: dict) -> None:
+    """原子写入界面设置（先 .tmp 再替换，避免半截文件让下次启动读不出来）。"""
+    path = ui_settings_path()
+    temporary = path + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as fh:
+            json.dump(values, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def default_config_path() -> str:
+    """启动时加载哪个配置：ui_settings.json 的 default_config 优先。
+
+    优先级：设置里的默认配置（存在才算）→ config.yaml → config_football.yaml →
+    config/ 下第一个可用的测号配置。设置里存**文件名**而不是绝对路径，配置目录随包
+    搬家后仍然有效；也允许写相对 config/ 的子路径。
+    """
+    wanted = str(load_ui_settings().get("default_config") or "").strip()
+    if wanted:
+        candidate = wanted if os.path.isabs(wanted) else os.path.join(CONFIG_DIR, wanted)
+        if os.path.isfile(candidate) and ConfigSelector.is_search_config(load_config(candidate)):
+            return candidate
+    for name in ("config.yaml", "config_football.yaml"):
+        candidate = os.path.join(CONFIG_DIR, name)
+        if os.path.isfile(candidate):
+            return candidate
+    try:
+        for name in sorted(os.listdir(CONFIG_DIR)):
+            candidate = os.path.join(CONFIG_DIR, name)
+            if (os.path.isfile(candidate)
+                    and os.path.splitext(name)[1].lower() in (".yaml", ".yml", ".json", ".toml")
+                    and ConfigSelector.is_search_config(load_config(candidate))):
+                return candidate
+    except OSError:
+        pass
+    return os.path.join(CONFIG_DIR, "config.yaml")
+
+
 def enable_windows_dpi_awareness() -> None:
     """声明本进程为 DPI 感知，避免窗口被 Windows 当位图拉伸而发虚。
 
@@ -430,6 +495,62 @@ class SimpleTextValue:
             self.widget.insert("1.0", str(value))
 
 
+def ask_continue_editing(parent, filename: str) -> bool:
+    """保存成功后的确认框：两个按钮「继续编辑」「退出编辑」。
+
+    为什么不用 messagebox：Tk 内置对话框的按钮文字是固定的（是/否、确定/取消），
+    改不了标签；这里要的就是这两个按钮名，所以自己搭一个小模态窗。
+    返回 True = 继续编辑，False = 退出编辑。关闭窗口或按 Esc 视为继续编辑，
+    避免一次误触就把还没看过效果的编辑现场关掉。
+    """
+    dialog = tk.Toplevel(parent)
+    dialog.title("已保存")
+    dialog.resizable(False, False)
+    try:
+        dialog.transient(parent)
+    except tk.TclError:
+        pass
+    try:
+        if parent is not None:
+            dialog.configure(bg=parent.cget("bg"))
+    except tk.TclError:
+        pass
+    ttk.Label(dialog, text=f"已保存 {filename}",
+              font=(UI_FONT, 12, "bold")).pack(anchor="w", padx=22, pady=(18, 4))
+    ttk.Label(dialog, text="接下来要做什么？").pack(anchor="w", padx=22, pady=(0, 14))
+    buttons = ttk.Frame(dialog)
+    buttons.pack(fill="x", padx=22, pady=(0, 18))
+    result = {"keep": True}
+
+    def choose(keep: bool):
+        result["keep"] = keep
+        dialog.destroy()
+
+    ttk.Button(buttons, text="继续编辑", command=lambda: choose(True)).pack(side="left")
+    ttk.Button(buttons, text="退出编辑", command=lambda: choose(False)).pack(side="left", padx=(8, 0))
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose(True))
+    dialog.bind("<Escape>", lambda _event: choose(True))
+    dialog.bind("<Return>", lambda _event: choose(True))
+    # 居中到父窗口的偏上位置，避免弹到屏幕角上
+    dialog.update_idletasks()
+    try:
+        left = parent.winfo_rootx() + max(0, (parent.winfo_width() - dialog.winfo_width()) // 2)
+        top = parent.winfo_rooty() + max(0, (parent.winfo_height() - dialog.winfo_height()) // 3)
+        dialog.geometry(f"+{left}+{top}")
+    except tk.TclError:
+        pass
+    dialog.grab_set()
+    try:
+        dialog.focus_set()
+        dialog.wait_window()
+    finally:
+        try:
+            dialog.grab_release()
+        except tk.TclError:
+            pass
+    return result["keep"]
+
+
 class ConfigSelector(tk.Toplevel):
     """配置选择窗口：列出 config/ 下的配置文件，供选择、编辑、删除或新建。
 
@@ -517,6 +638,8 @@ class ConfigSelector(tk.Toplevel):
         ttk.Button(actions, text="选择", command=self._select).pack(side="left")
         ttk.Button(actions, text="编辑", command=self._edit).pack(side="left", padx=(6, 0))
         ttk.Button(actions, text="删除", command=self._delete).pack(side="left", padx=(6, 0))
+        # 启动默认配置：写进 config/ui_settings.json，下次打开 UI 直接加载它。
+        ttk.Button(actions, text="设为启动默认", command=self._set_default).pack(side="left", padx=(18, 0))
         # 用户明确要求这两个也在本窗口内
         ttk.Button(actions, text="编辑新配置", command=self._new_config).pack(side="right")
         ttk.Button(actions, text="从文件导入", command=self._import_from_file).pack(side="right", padx=(0, 6))
@@ -647,6 +770,8 @@ class ConfigSelector(tk.Toplevel):
         编辑器可以正常输入，编辑完选择器恢复模态。
         """
         self._release_grab()
+        # 每次开新编辑器都重置「已收尾」标记，否则第二次打开后不再收尾（见 _on_editor_closed）。
+        self._closed_editor = None
         self.monitor._open_editor_for(path)
         if self.monitor.editor is not None:
             self.monitor.editor.bind("<Destroy>", self._on_editor_closed, add="+")
@@ -658,10 +783,51 @@ class ConfigSelector(tk.Toplevel):
             return
         self._open_editor_with_grab_handoff(path)
 
-    def _on_editor_closed(self, _event=None):
-        # 编辑器关掉后把模态抓回来，并刷新表格（配置可能已被编辑）
-        self.after(50, self._grab_input)
-        self.after(50, self.refresh)
+    def _on_editor_closed(self, event=None):
+        """编辑器关闭后的收尾：把模态抓回选择器并刷新表格（**只做一次**）。
+
+        `<Destroy>` 会沿 bindtags 冒泡到 Toplevel —— 编辑器里**每一个子控件**销毁都会
+        触发一次本回调（实测 5 个子控件 → 5 次；编辑器有几百个控件）。旧代码每次都
+        `after(50, grab)` + `after(50, refresh)`，于是关掉编辑器后要排几百次 `grab_set`
+        和几百次整表重建（每次都要重新读取并解析 config/ 下所有配置、再算字符集大小），
+        表现就是"卡死几秒 → 把期间的点击一次性重放"，偶发还会崩溃。
+        这里只认编辑器顶层本身，且同一编辑器只处理一次。
+        """
+        editor = self.monitor.editor
+        if event is not None and event.widget is not editor:
+            return
+        if editor is not None and getattr(self, "_closed_editor", None) is editor:
+            return
+        self._closed_editor = editor
+        self.after(50, self._reopen_grab_and_refresh)
+
+    def _reopen_grab_and_refresh(self):
+        """编辑器关闭后的延迟收尾：选择器可能已一并关闭，先确认它还在。"""
+        if not self.winfo_exists():
+            return
+        self._grab_input()
+        self.refresh()
+
+    def _set_default(self):
+        """把选中配置记成「启动时默认加载」，写入 config/ui_settings.json。
+
+        存文件名而不是绝对路径：配置目录随发布包搬家后仍然有效（见 default_config_path）。
+        """
+        path = self._require_selection()
+        if path is None:
+            return
+        name = os.path.basename(path)
+        settings = load_ui_settings()
+        settings["default_config"] = name
+        try:
+            save_ui_settings(settings)
+        except OSError as exc:
+            messagebox.showerror("无法保存界面设置", str(exc), parent=self)
+            return
+        self.monitor.status_var.set(f"启动默认配置：{name}")
+        messagebox.showinfo("已设为启动默认",
+                            f"以后打开界面会默认加载「{name}」。\n\n"
+                            f"设置在 config/{UI_SETTINGS_NAME} 里，可以手工改回。", parent=self)
 
     def _delete(self):
         """删除当前配置（需确认）。"""
@@ -803,9 +969,8 @@ class Monitor(tk.Tk):
         self.last_board_refresh = 0.0
         self.stats = {"realtime": "--", "overall": "--", "elapsed": "--", "count": "0", "found": "0", "left": "--"}
         self.stat_vars = {key: tk.StringVar(value=value) for key, value in self.stats.items()}
-        default_config = os.path.join(CONFIG_DIR, "config.yaml")
-        if not os.path.isfile(default_config):
-            default_config = os.path.join(CONFIG_DIR, "config_football.yaml")
+        # 启动配置：config/ui_settings.json 的 default_config 优先（见 default_config_path）。
+        default_config = default_config_path()
         # config_var 保存**完整路径**（内部使用）；config_name_var 是界面上那一格，
         # 只显示文件名。两者通过 _config_path() 保持一致。
         self.config_var = tk.StringVar(value=default_config)
@@ -835,6 +1000,10 @@ class Monitor(tk.Tk):
         self._run_effective_start: int = 0
         # 「编辑新配置」预置的空白配置：非 None 时编辑器用它而不是读文件
         self._pending_editor_cfg: dict | None = None
+        # 模态窗口句柄先建好：_apply_theme / _open_config_selector 可能在编辑器或
+        # 选择器还没创建时就要读它们（见 _apply_theme 的 getattr 兜底说明）。
+        self.editor: tk.Toplevel | None = None
+        self._config_selector: ConfigSelector | None = None
         self._run_processed: int = 0
         self._run_config_path: str | None = None
         self._run_start_updated = False
@@ -1020,6 +1189,24 @@ class Monitor(tk.Tk):
         style.configure("TSpinbox", fieldbackground=colors["field"], foreground=colors["text"], insertcolor=colors["text"], font=(UI_FONT, 11))
         style.configure("TCombobox", fieldbackground=colors["field"], background=colors["panel"], foreground=colors["text"], font=(UI_FONT, 11))
         style.map("TCombobox", fieldbackground=[("readonly", colors["field"])], foreground=[("readonly", colors["text"])])
+        # ttk.Treeview 不跟随 TFrame/TLabel：clam 主题下它固定用白底，深色模式里配置
+        # 选择器的表格会白得刺眼。表格、表头、选中行都要单独上色。
+        for name in ("Treeview", "Config.Treeview"):
+            style.configure(name, background=colors["field"], fieldbackground=colors["field"],
+                            foreground=colors["text"], font=(UI_FONT, 11))
+            style.map(name,
+                      background=[("selected", colors["accent"])],
+                      foreground=[("selected", colors["bg"])])
+            style.configure(name + ".Heading", background=colors["panel"],
+                            foreground=colors["text"], font=(UI_FONT, 12, "bold"))
+            style.map(name + ".Heading", background=[("active", colors["field"])])
+        # 已经打开的模态窗口（选择器 / 编辑器）也要跟着换底色：ttk 子控件走样式，
+        # 但 Toplevel 自己的背景要显式设置。两者在首次 _apply_theme 时可能还不存在，
+        # 所以用 getattr 兜底（曾经这里用 self.editor 直接取，__init__ 阶段就抛
+        # AttributeError，导致上一个 Tk 根泄漏、后续窗口 iconphoto 全部失败）。
+        for window in (getattr(self, "_config_selector", None), getattr(self, "editor", None)):
+            if window is not None and window.winfo_exists():
+                window.configure(bg=colors["bg"])
         self.score_canvas.configure(bg=colors["bg"])
         for canvas in getattr(self, "_editor_canvases", []):
             if canvas.winfo_exists():
@@ -2159,7 +2346,9 @@ class Monitor(tk.Tk):
         cfg = copy.deepcopy(self.editor_cfg)
         def integer(key):
             return int(self.editor_vars[key].get().strip())
-        self._set_cfg_value(cfg, "team_name", self.editor_vars["team_name"].get().strip())
+        # 原样保存：首尾空格是用户显式输入的（游戏里确实可能带空格）。会破坏参数协议
+        # 的字符（换行/制表符/逗号）由 _validate_config 明确拒绝，不在这里静默改写。
+        self._set_cfg_value(cfg, "team_name", self.editor_vars["team_name"].get())
         for key in ("threads.worker_threads", "enumeration.variable_length"):
             self._set_cfg_value(cfg, key, integer(key))
         mode = self.editor_choice_maps["enumeration.mode"][self.editor_vars["enumeration.mode"].get()]
@@ -2169,10 +2358,17 @@ class Monitor(tk.Tk):
         cfg["prefixes"] = [{"name": name} for name, _, _ in prefixes]
         cfg["suffixes"] = [{"name": name} for name in suffixes]
         if mode == 1:
-            cfg["enumeration"]["prefix_ranges"] = [
-                {"count": 1, "start": int(str(start).strip()), "end": int(str(end).strip())}
-                for _, start, end in prefixes
-            ]
+            # 所有前缀填的区间完全一样时，它等价于「全局区间」：只写 ranges、不写
+            # prefix_ranges。否则那份副本会一直盖住全局区间，start / resume /
+            # 「自动更新 start」也被绕开（见 _apply_range_end）。各前缀确实不同才写。
+            rows = [(int(str(start).strip()), int(str(end).strip())) for _, start, end in prefixes]
+            if len(set(rows)) == 1:
+                cfg["enumeration"].pop("prefix_ranges", None)
+                cfg["enumeration"]["ranges"] = [{"start": rows[0][0], "end": rows[0][1]}]
+            else:
+                cfg["enumeration"]["prefix_ranges"] = [
+                    {"count": 1, "start": start, "end": end} for start, end in rows
+                ]
         else:
             cfg["enumeration"].pop("prefix_ranges", None)
         cs = cfg["character_set"]
@@ -2299,6 +2495,12 @@ class Monitor(tk.Tk):
         if start:
             self._close_editor()
             self._start()
+            return
+        # 保存成功后给出明确反馈并让用户选去向（继续编辑 / 退出编辑）。
+        # 只有确实存在一个活着的编辑器窗口时才弹（单测会直接调本方法，没有真窗口）。
+        if self.editor is not None and self.editor.winfo_exists():
+            if not ask_continue_editing(self.editor, os.path.basename(target)):
+                self._close_editor()
 
     def _confirm_affix_mismatch(self, cfg):
         if cfg.get("enumeration", {}).get("mode") != 4:
@@ -2470,6 +2672,22 @@ class Monitor(tk.Tk):
             ranges = cfg.get("enumeration", {}).get("ranges") or []
             if not ranges:
                 return
+            # 顺序模式下各前缀区间不同时，总量无法摊回每个前缀（谁跑得多看不出来）。
+            # 只有「最后一条结果」能指出某个前缀走到哪，取不到就保持原样 —— 绝不按
+            # 平均量瞎平移，否则会把没测的区间直接跳过。
+            if cfg.get("enumeration", {}).get("mode") == 1 and cfg["enumeration"].get("prefix_ranges"):
+                from .main import _try_resume
+                result_file = getattr(self, '_run_result_file', None)
+                resumed = _try_resume(cfg, result_file, out_dir=ROOT) if result_file else None
+                if resumed is None:
+                    self.status_var.set('各前缀区间不同且没有可信的完成位置，未更新 start')
+                    return
+                save_config(path, resumed[0])
+                self._run_last_saved_config = copy.deepcopy(resumed[0])
+                if final:
+                    self._run_start_updated = True
+                self.status_var.set('已按各前缀完成位置更新起点')
+                return
             base = self._run_effective_start
             # 多区间时按各自相对首个区间的偏移平移，保持"每个区间都推进同样多"的语义
             offset = base - int(ranges[0].get("start", 0) or 0)
@@ -2531,6 +2749,36 @@ class Monitor(tk.Tk):
             self.editor.destroy()
         self.editor = None
 
+    def _apply_range_end(self, cfg: dict) -> None:
+        """把主窗口「范围终点」这一格落到配置上，**所有模式**都生效。
+
+        以前只有 `format` 配置会用到它，普通/顺序配置在界面上改「范围终点」毫无作用 ——
+        看起来设了全局区间，实际跑的还是配置文件里写着的那一个。
+
+        顺序模式（mode=1）还多一层：如果 `prefix_ranges` 里每个前缀的区间完全一样，
+        它其实就是全局区间的副本（编辑器保存时会这样写）。这种情况下按全局区间重写并
+        丢掉 prefix_ranges，让 start / resume / 「自动更新 start」都回到 `ranges` 这条
+        唯一路径上；各前缀区间确实不同时才保留，并在状态栏说明用的是哪一个。
+        """
+        raw = self.range_var.get().strip()
+        try:
+            end = int(raw)
+        except (TypeError, ValueError):
+            end = None
+        en = cfg.setdefault("enumeration", {})
+        ranges = en.get("ranges") or [{"start": 0, "end": -1}]
+        en["ranges"] = ranges
+        if end is not None:
+            ranges[0]["end"] = end
+        prefix_ranges = en.get("prefix_ranges")
+        if not prefix_ranges:
+            return
+        shape = {(int(p.get("start", 0)), int(p.get("end", -1))) for p in prefix_ranges}
+        if len(shape) == 1:
+            en.pop("prefix_ranges", None)
+            return
+        self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，范围终点这一格不生效")
+
     def _start(self):
         """校验界面输入并启动一次测号任务（图形监控器入口）。
 
@@ -2548,8 +2796,7 @@ class Monitor(tk.Tk):
             cfg = load_config(config_path)
             self._run_last_saved_config = copy.deepcopy(cfg)
             _validate_config(cfg)
-            if 'format' in cfg and not cfg['enumeration'].get('prefix_ranges'):
-                cfg['enumeration']['ranges'][0]['end'] = int(self.range_var.get())
+            self._apply_range_end(cfg)
             self._run_result_file = _resolve_result_file(self._selected_result_file())
             # 格式顺序任务使用连续完成检查点；旧配置保留命中反推语义。
             if resume:

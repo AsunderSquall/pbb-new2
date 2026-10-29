@@ -430,6 +430,23 @@ def _die(msg: str):
     raise ConfigError(msg)
 
 
+# 名字（前缀/后缀/队伍）会原样进入两条**不转义**的通道：
+#   1. 引擎参数文件：每行 `key=value`，多个前缀/后缀用逗号分隔（见 engine._build_params）；
+#   2. 结果文件：一行一个 `名字@队伍`，靠换行分隔（见 engine.hpp 的输出分支）。
+# 因此名字里出现这些字符时，后面的内容会被当成别的东西 —— 真实故障：某个前缀名字里带
+# 换行，`prefixes=` 那一行被截断，引擎只拿到 2 个前缀，第 3 个前缀一个候选都没测，
+# 而且没有任何报错。与其静默算错，不如在入口处明确拒绝。
+_UNSAFE_NAME_CHARS = {',': '逗号', '\n': '换行', '\r': '回车', '\t': '制表符', '\0': 'NUL'}
+
+
+def _check_name_text(where: str, value: str) -> None:
+    """拒绝会破坏参数协议/结果文件行结构、且无法转义的字符。"""
+    for char, label in _UNSAFE_NAME_CHARS.items():
+        if char in value:
+            _die(f"{where} 不能包含{label}：引擎参数与结果文件按它分隔，含它会静默丢掉"
+                 f"后面的前缀/后缀。请改成其它字符，当前: {value!r}")
+
+
 def _validate_config(cfg: dict):
     """校验配置字段合法性, 不合法立即退出.
 
@@ -449,6 +466,7 @@ def _validate_config(cfg: dict):
     tn = _read_cfg(cfg, "team_name")
     if not tn or not isinstance(tn, str):
         _die("team_name 不能为空")
+    _check_name_text("team_name", tn)
 
     # ── prefixes ──
     pfx = cfg.get("prefixes", [])
@@ -457,6 +475,7 @@ def _validate_config(cfg: dict):
     for i, p in enumerate(pfx):
         if not isinstance(p.get("name"), str):
             _die(f"prefixes[{i}].name 必须为字符串")
+        _check_name_text(f"prefixes[{i}].name", p["name"])
 
     # ── suffixes ──
     sfx = cfg.get("suffixes", [])
@@ -465,6 +484,7 @@ def _validate_config(cfg: dict):
     for i, s in enumerate(sfx):
         if not isinstance(s.get("name"), str):
             _die(f"suffixes[{i}].name 必须为字符串")
+        _check_name_text(f"suffixes[{i}].name", s["name"])
 
     # ── character_set ──
     cs = cfg.get("character_set", {})
@@ -508,8 +528,10 @@ def _validate_config(cfg: dict):
         end = r.get("end", int(1e18))
         if not isinstance(start, int) or start < 0:
             _die(f"enumeration.ranges[{i}].start 必须 >= 0, 当前: {start}")
-        if not isinstance(end, int) or (end != -1 and end <= start):
-            _die(f"enumeration.ranges[{i}].end 必须 > start (或 -1=无限), 当前: end={end} start={start}")
+        # end == start 是合法的「空区间」：一个区间测完之后「自动更新 start」正好把
+        # start 推到 end，旧规则此时会让配置变成"无法编辑/无法打开"（end 必须 > start）。
+        if not isinstance(end, int) or (end != -1 and end < start):
+            _die(f"enumeration.ranges[{i}].end 必须 >= start (或 -1=无限), 当前: end={end} start={start}")
 
     # ── enumeration.prefix_ranges (可选: 按连续段分配前缀区间) ──
     pfx_count = len(cfg.get("prefixes", []))
@@ -533,10 +555,12 @@ def _validate_config(cfg: dict):
                 pass
             elif end == -1:
                 pass  # 几乎无限 — engine 层会展开
-            elif end == start and 'format' in cfg and mode == 1:
-                pass  # 格式检查点完成的有限区间保留 end，不丢失覆盖边界。
-            elif end <= start:
-                _die(f"enumeration.prefix_ranges[{i}].end 必须 > start (或 0=跳过, -1=无限), 当前: end={end} start={start}")
+            elif end == start:
+                # 空区间：该前缀本轮没有剩余候选（已测完 / 临时跳过）。续测与
+                # 「自动更新 start」都会写出这种区间，必须允许它存在且可编辑。
+                pass
+            elif end < start:
+                _die(f"enumeration.prefix_ranges[{i}].end 必须 >= start (或 0=跳过, -1=无限), 当前: end={end} start={start}")
             total_cnt += cnt
         if total_cnt != pfx_count:
             _die(f"enumeration.prefix_ranges count 总和 ({total_cnt}) != prefixes 数量 ({pfx_count})")
