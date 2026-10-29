@@ -101,25 +101,22 @@ class RangeEndApplicationTests(unittest.TestCase):
             status_var=types.SimpleNamespace(set=lambda _value: None),
         )
 
-    def test_identical_prefix_ranges_collapse_into_the_global_range(self):
-        cfg = base_config(prefix_ranges=[{'count': 1, 'start': 0, 'end': 1000}] * 3)
+    def test_prefix_ranges_are_never_rewritten(self):
+        """全局终点只落在 ranges 上；前缀区间是布局，程序绝不改写（也不再"收拢"）。"""
+        layout = [{'count': 1, 'start': 0, 'end': 1000}] * 3
+        cfg = base_config(prefix_ranges=[dict(item) for item in layout])
         cfg['prefixes'] = [{'name': '一'}, {'name': '二'}, {'name': '三'}]
         ui.Monitor._apply_range_end(self.stub('5000'), cfg)
-        self.assertNotIn('prefix_ranges', cfg['enumeration'])
+        self.assertEqual(cfg['enumeration']['prefix_ranges'], layout)
         self.assertEqual(cfg['enumeration']['ranges'], [{'start': 0, 'end': 5000}])
 
-    def test_distinct_prefix_ranges_are_kept_and_global_hint_is_reported(self):
+    def test_distinct_prefix_ranges_are_kept(self):
         cfg = base_config(prefix_ranges=[{'count': 1, 'start': 0, 'end': 10},
                                          {'count': 1, 'start': 0, 'end': 20}])
         cfg['prefixes'] = [{'name': '一'}, {'name': '二'}]
-        messages = []
-        stub = types.SimpleNamespace(
-            range_var=types.SimpleNamespace(get=lambda: '5000'),
-            status_var=types.SimpleNamespace(set=messages.append))
-        ui.Monitor._apply_range_end(stub, cfg)
+        ui.Monitor._apply_range_end(self.stub('5000'), cfg)
         self.assertEqual(len(cfg['enumeration']['prefix_ranges']), 2)
         self.assertEqual(cfg['enumeration']['ranges'], [{'start': 0, 'end': 5000}])
-        self.assertTrue(messages and 'prefix_ranges' in messages[-1])
 
     def test_global_range_end_applies_without_prefix_ranges(self):
         """以前只有 format 配置会应用「范围终点」，普通/随机配置改了没用。"""

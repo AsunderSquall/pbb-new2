@@ -89,7 +89,10 @@ class FlexConfigTests(unittest.TestCase):
             out = Path(directory)/'out';out.mkdir()
             (out/'unused.resume').write_text(flex.resume_id(task, template, slots)+'\n0 8 20\n', encoding='ascii')
             resumed, _ = _try_resume(cfg, 'unused', out_dir=directory)
-        self.assertEqual(resumed['enumeration']['prefix_ranges'],[{'count':1,'start':8,'end':20}])
+        # 新口径：resume 只把全局 start 改到读到的位置；单前缀、布局 [0,-1)、总量 20，
+        # 所以全局 8 就是前缀内位置 8。prefix_ranges 不会被创建或改写。
+        self.assertEqual(resumed['enumeration']['ranges'][0]['start'], 8)
+        self.assertNotIn('prefix_ranges', resumed['enumeration'])
 
     def test_file_import_relative_bom_words_and_frozen_task(self):
         with tempfile.TemporaryDirectory(dir=paths.BUILD_DIR) as directory:
@@ -106,22 +109,27 @@ class FlexConfigTests(unittest.TestCase):
             file.write_text('护球\nA\n',encoding='utf8')
             with self.assertRaises(ValueError):flex.normalize_config(loaded)
 
-    def test_resume_checks_file_content_and_keeps_each_prefix_range(self):
+    def test_resume_checks_file_content_and_keeps_prefix_ranges(self):
         with tempfile.TemporaryDirectory(dir=paths.BUILD_DIR) as directory:
             file=Path(directory)/'chars.txt';file.write_text('0\n1\n',encoding='utf8')
             cfg=config();cfg['character_sets']={'数字':{'single_char_length':1,'file':str(file)}}
             cfg['prefixes']=[{'name':'A'},{'name':'AB'},{'name':'A'}]
             cfg['enumeration']['ranges']=[{'start':0,'end':-1}]
-            cfg['enumeration']['prefix_ranges']=[{'count':1,'start':2,'end':-1},{'count':1,'start':10,'end':40},{'count':1,'start':0,'end':0}]
+            layout=[{'count':1,'start':2,'end':-1},{'count':1,'start':10,'end':40},{'count':1,'start':0,'end':0}]
+            cfg['enumeration']['prefix_ranges']=layout
             task=_build_task_config(cfg);template,slots=flex.build_layout(task,engine._build_charset)
             out=Path(directory)/'out';out.mkdir()
             self.assertIsNone(_try_resume(cfg,'r',out_dir=directory))
             checkpoint=out/'r.resume'
             checkpoint.write_text(flex.resume_id(task,template,slots)+'\n2 12 64\n10 20 40\n0 0 0\n',encoding='ascii')
             resumed,_=_try_resume(cfg,'r',out_dir=directory)
-            self.assertEqual(resumed['enumeration']['prefix_ranges'],[{'count':1,'start':12,'end':64},{'count':1,'start':20,'end':40},{'count':1,'start':0,'end':0}])
-            wider=copy.deepcopy(cfg);wider['enumeration']['prefix_ranges'][1]['end']=41
-            with self.assertRaisesRegex(ValueError,'覆盖范围'):_try_resume(wider,'r',out_dir=directory)
+            # 新口径：prefix_ranges 一字不动，resume 只把全局 start 折算到
+            # 「第一个没跑完的前缀」的连续完成位置：前缀0 从 2 走到 12 → 全局 10。
+            self.assertEqual(resumed['enumeration']['prefix_ranges'],layout)
+            self.assertEqual(resumed['enumeration']['ranges'][0]['start'],10)
+            # 检查点比当前布局更宽（上次的上界 64 > 现在的 50）→ 拒绝，别拿它算起点。
+            narrower=copy.deepcopy(cfg);narrower['enumeration']['prefix_ranges'][0]['end']=50
+            with self.assertRaisesRegex(ValueError,'覆盖范围'):_try_resume(narrower,'r',out_dir=directory)
             file.write_text('1\n0\n',encoding='utf8')
             with self.assertRaisesRegex(ValueError,'不一致'):_try_resume(cfg,'r',out_dir=directory)
 
@@ -154,7 +162,7 @@ class FlexConfigTests(unittest.TestCase):
                 saved=window._editor_config()
                 self.assertEqual(saved['character_sets']['希腊']['single_char_length'],2)
                 self.assertEqual(saved['character_sets']['希腊']['file'],str(imported.resolve()))
-                # UI 还没有收到进度行时，也能用检查点回写每前缀起点。
+                # UI 还没有收到进度行时，也能用检查点把全局 start 改到完成位置。
                 out=Path(directory)/'out';out.mkdir()
                 task=_build_task_config(cfg);template,slots=flex.build_layout(task,engine._build_charset)
                 (out/'r.resume').write_text(flex.resume_id(task,template,slots)+'\n0 12 100000\n',encoding='ascii')
@@ -163,7 +171,9 @@ class FlexConfigTests(unittest.TestCase):
                 window._run_start_updated=False;window.auto_start_var.set(True)
                 with patch.object(ui,'ROOT',directory):window._advance_config_start()
                 updated=ui.load_config(str(path))
-                self.assertEqual(updated['enumeration']['prefix_ranges'],[{'count':1,'start':12,'end':100000}])
+                # 只改全局 start；这份配置本来没有 prefix_ranges，不应凭空出现一份。
+                self.assertEqual(updated['enumeration']['ranges'][0]['start'],12)
+                self.assertNotIn('prefix_ranges',updated['enumeration'])
                 _validate_config(updated)
                 window.flex_enabled_var.set(False)
                 legacy=window._editor_config()
@@ -214,7 +224,9 @@ class FlexEngineTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual((out/'r').read_text(), '')
                 rows=(out/'r.resume').read_text().splitlines()
-                self.assertEqual(rows[1:],['13 2100031 2100031']*2)
+                # 全局 end=2100031 落在第一个前缀的空间里 → 第二个前缀本次分到空区间
+                # (0,0)，检查点如实记成 '0 0 0'。这不是完成位置，而是"这次没轮到它"。
+                self.assertEqual(rows[1:],['13 2100031 2100031','0 0 0'])
                 template,slots=flex.build_layout(task,engine._build_charset)
                 self.assertEqual(rows[0],flex.resume_id(task,template,slots))
 
@@ -258,7 +270,11 @@ class FlexEngineTests(unittest.TestCase):
             self.assertEqual(set((out/'r').read_text(encoding='utf8').splitlines()),set(reference[0]))
             self.assertEqual(set((out/'blue.txt').read_text(encoding='utf8').splitlines()),set(reference[1]))
             final,_=_try_resume(cfg,'r',out_dir=directory)
-            self.assertTrue(all(r['start']==r['end']==4000031 for r in final['enumeration']['prefix_ranges']))
+            # 全部跑完后全局 start 已在总量末尾：映射回来没有任何前缀还有剩余。
+            from pbb import sequential
+            self.assertTrue(all(low==high for low,high in sequential.effective_prefix_ranges(final)))
+            self.assertEqual(final['enumeration'].get('prefix_ranges'),
+                             cfg['enumeration'].get('prefix_ranges'))
             _validate_config(final)
 
     def test_homogeneous_format_matches_legacy_all_modes_and_widths(self):
@@ -294,10 +310,13 @@ class FlexEngineTests(unittest.TestCase):
 
     def test_range_clipping_and_scalar_tail(self):
         cfg=config();cfg['format']=[{'charset':'数字'}]
-        task=_build_task_config(cfg)
+        # 区间现在由全局 ranges 决定（mode 1 会把它映射成前缀区间），所以要改配置再
+        # 重建任务；直接改 task['range_L'] 不会生效，也不再是生产路径。
         for start,end,count in ((0,3,3),(0,4,4),(7,30,3),(15,30,0)):
             with self.subTest(start=start,end=end):
-                result=self.execute(dict(task,range_L=start,range_R=end))
+                case=copy.deepcopy(cfg)
+                case['enumeration']['ranges']=[{'start':start,'end':end}]
+                result=self.execute(_build_task_config(case))
                 self.assertTrue(result[2].endswith('count='+str(count)))
 
     def test_cross_chunk_tail_and_many_positions(self):
@@ -314,19 +333,26 @@ class FlexEngineTests(unittest.TestCase):
         cfg=config()
         cfg['character_sets']['汉字']={'single_char_length':3,'types':[7],'custom_values':'春夏秋冬'}
         cfg['format']=['[',{'charset':'汉字'},'-',*[{'charset':'数字'} for _ in range(7)],']']
-        task=_build_task_config(cfg);task.update(range_L=0,range_R=1000003,seed=42)
         for mode in (2,3,4):
             with self.subTest(mode=mode):
-                a=self.execute(dict(task,mode=mode,n_threads=1))
-                b=self.execute(dict(task,mode=mode,n_threads=3))
+                # 按目标模式建任务：mode 1 会把全局区间映射成前缀布局，随机模式则用
+                # range_L/range_R 本身，不能在建好任务后再改 mode。
+                case=copy.deepcopy(cfg)
+                case['enumeration']['mode']=mode
+                case['enumeration']['ranges']=[{'start':0,'end':1000003}]
+                task=_build_task_config(case);task['seed']=42
+                a=self.execute(dict(task,n_threads=1))
+                b=self.execute(dict(task,n_threads=3))
                 self.assertEqual(a[:3],b[:3]);self.assertTrue(a[0])
                 count=1000003 if mode==3 else 2000000
                 self.assertTrue(a[2].endswith('count='+str(count)))
                 self.assertTrue(all(re.match(r'\[[春夏秋冬]-\d{7}\]@test ',x) for x in a[0]))
 
     def test_runtime_thread_control_with_flex_ui(self):
-        task=_build_task_config(config());task.update(range_R=20000000,mode=2,seed=123,
-                                                     ui_mode=True,output_xp=0,n_threads=2)
+        # 按目标模式建任务（mode 1 会把全局区间映射成前缀布局，随机模式用 range_L/R）。
+        cfg=config();cfg['enumeration']['mode']=2
+        cfg['enumeration']['ranges']=[{'start':0,'end':20000000}]
+        task=_build_task_config(cfg);task.update(seed=123,ui_mode=True,output_xp=0,n_threads=2)
         params=engine._build_params(task,engine._build_charset(task['character_set']),'result.txt')
         with tempfile.TemporaryDirectory(dir=paths.BUILD_DIR) as directory:
             out=Path(directory)/'out';out.mkdir()

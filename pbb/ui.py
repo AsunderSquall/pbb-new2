@@ -2405,17 +2405,13 @@ class Monitor(tk.Tk):
         cfg["prefixes"] = [{"name": single_line_text(name)} for name, _, _ in prefixes]
         cfg["suffixes"] = [{"name": single_line_text(name)} for name in suffixes]
         if mode == 1:
-            # 所有前缀填的区间完全一样时，它等价于「全局区间」：只写 ranges、不写
-            # prefix_ranges。否则那份副本会一直盖住全局区间，start / resume /
-            # 「自动更新 start」也被绕开（见 _apply_range_end）。各前缀确实不同才写。
-            rows = [(int(str(start).strip()), int(str(end).strip())) for _, start, end in prefixes]
-            if len(set(rows)) == 1:
-                cfg["enumeration"].pop("prefix_ranges", None)
-                cfg["enumeration"]["ranges"] = [{"start": rows[0][0], "end": rows[0][1]}]
-            else:
-                cfg["enumeration"]["prefix_ranges"] = [
-                    {"count": 1, "start": start, "end": end} for start, end in rows
-                ]
+            # 顺序模式：全局区间（上面 ranges 那两格）是总控制器，前缀区间只是布局。
+            # 用户填什么就存什么，程序不替用户改写 start/end，也不因为"都填一样"就
+            # 偷偷收进全局区间（见 pbb/sequential.py 的约定）。
+            cfg["enumeration"]["prefix_ranges"] = [
+                {"count": 1, "start": int(str(start).strip()), "end": int(str(end).strip())}
+                for _, start, end in prefixes
+            ]
         else:
             cfg["enumeration"].pop("prefix_ranges", None)
         cs = cfg["character_set"]
@@ -2667,26 +2663,23 @@ class Monitor(tk.Tk):
         return summary
 
     def _advance_config_start(self, *, final=True):
-        """把配置里每个前缀区间的 ``start`` 推进到「续测起点 + 本次处理量」。
+        """「自动更新 start」：只推进**全局** ``enumeration.ranges[0].start``。
 
-        语义（与「自动更新 start」复选框对应）：结束时把本次扫描过的量记进配置，
-        于是下次直接点「开始」就从停下的位置继续，不必依赖续测。**关闭窗口时也会执行**。
+        新口径（见 pbb/sequential.py）：全局区间是唯一的总控制器，`start` 表示
+        "总量里已经测过多少"；各前缀的 ``prefix_ranges`` 是布局，**永远不主动修改**。
 
         为什么基准取「续测起点」而不是配置文件里的 start：
-          勾了续测时本次是从结果文件推出的位置（可能远大于配置里的 start）开始扫的。
+          勾了续测时本次是从续测位置（可能远大于配置里的 start）开始扫的。
           若只按 ``配置 start + 处理量`` 回写，start 会比实际扫到的位置**落后**一截，
           下次启动就会把这中间已经扫过的区间重扫一遍。所以基准取
-          ``本次实际起步位置``（``_run_effective_start``：未续测时等于配置 start，
-          续测时等于续测后的 start）。
+          ``本次实际起步位置``（``_run_effective_start``，续测时已等于续测后的 start）。
 
-        实现要点：
-          * 其余字段用**本次运行起步时的 config 快照**（``_run_origin``），而不是磁盘当前
-            内容 —— 否则续测场景下会把已经推进过的值再加一遍；
-          * 处理量取 ``self._run_processed``（进度行 ``count=X.XXXT`` 换算而来），
-            它正是「已下发并算完的候选数」，与 start 的计数口径一致；
-          * 仅在 ``enumeration.ranges`` 上推进：``prefix_ranges`` 是续测用的派生字段，
-            回写它会把"临时续测范围"固化成配置，反而破坏语义；
-          * 只写一次（``_run_start_updated``），避免 stop 与 close 重复累加。
+        两处细节：
+          * 格式任务有连续完成检查点（``.resume``），它比"已下发量"更保守 —— 有检查点时
+            用检查点折算出的全局位置，避免把乱序完成的空洞当成已完成；没有检查点时按
+            ``_run_processed`` 推进。
+          * 其余字段用本次运行起步时的快照 ``_run_origin``，并把结果写回磁盘；
+            只写一次（``_run_start_updated``），避免停止与关窗重复累加。
         """
         if self._run_start_updated:
             return
@@ -2695,6 +2688,8 @@ class Monitor(tk.Tk):
         origin = self._run_origin
         path = self._run_config_path
         processed = self._run_processed
+        # format 任务即使还没收到进度行，也能靠连续完成检查点证明进度，所以不因
+        # processed==0 直接退出；其它模式没有检查点，0 处理量意味着没东西可推进。
         if not origin or not path or (processed <= 0 and 'format' not in origin):
             return
         try:
@@ -2702,50 +2697,27 @@ class Monitor(tk.Tk):
             expected = getattr(self, '_run_last_saved_config', None)
             if isinstance(expected, dict) and load_config(path) != expected:
                 raise ValueError('配置在运行中被修改，保留磁盘配置，请使用 Resume 恢复检查点')
-            if 'format' in cfg:
-                from .main import _try_resume
-                result_file = getattr(self, '_run_result_file', None)
-                if not result_file:
-                    return
-                resumed = _try_resume(cfg, result_file, out_dir=ROOT)
-                if resumed is None:
-                    return
-                save_config(path, resumed[0])
-                self._run_last_saved_config = copy.deepcopy(resumed[0])
-                if final:
-                    self._run_start_updated = True
-                self.status_var.set('已按各前缀连续完成检查点更新起点')
-                return
             ranges = cfg.get("enumeration", {}).get("ranges") or []
             if not ranges:
                 return
-            # 顺序模式下各前缀区间不同时，总量无法摊回每个前缀（谁跑得多看不出来）。
-            # 只有「最后一条结果」能指出某个前缀走到哪，取不到就保持原样 —— 绝不按
-            # 平均量瞎平移，否则会把没测的区间直接跳过。
-            if cfg.get("enumeration", {}).get("mode") == 1 and cfg["enumeration"].get("prefix_ranges"):
+            advanced = None
+            result_file = getattr(self, '_run_result_file', None)
+            if 'format' in cfg and result_file:
                 from .main import _try_resume
-                result_file = getattr(self, '_run_result_file', None)
-                resumed = _try_resume(cfg, result_file, out_dir=ROOT) if result_file else None
-                if resumed is None:
-                    self.status_var.set('各前缀区间不同且没有可信的完成位置，未更新 start')
-                    return
-                save_config(path, resumed[0])
-                self._run_last_saved_config = copy.deepcopy(resumed[0])
-                if final:
-                    self._run_start_updated = True
-                self.status_var.set('已按各前缀完成位置更新起点')
-                return
-            base = self._run_effective_start
-            # 多区间时按各自相对首个区间的偏移平移，保持"每个区间都推进同样多"的语义
-            offset = base - int(ranges[0].get("start", 0) or 0)
-            for item in ranges:
-                old = int(item.get("start", 0) or 0)
-                item["start"] = old + offset + processed
+                resumed = _try_resume(cfg, result_file, out_dir=ROOT)
+                if resumed is not None:
+                    advanced = int(resumed[0]["enumeration"]["ranges"][0].get("start", 0) or 0)
+            if advanced is None:
+                advanced = self._run_effective_start + processed
+            end = ranges[0].get("end", -1)
+            if end not in (-1, None):
+                advanced = min(advanced, int(end))
+            ranges[0]["start"] = max(0, int(advanced))
             save_config(path, cfg)
             self._run_last_saved_config = copy.deepcopy(cfg)
             if final:
                 self._run_start_updated = True
-            self.status_var.set(f"已更新 {os.path.basename(path)} 的 start（→{base + processed}）")
+            self.status_var.set(f"已更新 {os.path.basename(path)} 的全局 start（→{ranges[0]['start']}）")
         except Exception as exc:
             # 回写失败不能影响停止流程，只在状态栏提示
             self.status_var.set(f"更新 start 失败：{exc}")
@@ -2797,33 +2769,24 @@ class Monitor(tk.Tk):
         self.editor = None
 
     def _apply_range_end(self, cfg: dict) -> None:
-        """把主窗口「范围终点」这一格落到配置上，**所有模式**都生效。
+        """把主窗口「范围终点」这一格落到**全局**区间上（所有模式都生效）。
 
-        以前只有 `format` 配置会用到它，普通/顺序配置在界面上改「范围终点」毫无作用 ——
-        看起来设了全局区间，实际跑的还是配置文件里写着的那一个。
+        全局区间是唯一的总控制器（见 pbb/sequential.py）：顺序模式下它表示"所有前缀
+        总量"的坐标上界，`-1` = 全部。**前缀区间一个字都不动** —— 它们只是布局。
 
-        顺序模式（mode=1）还多一层：如果 `prefix_ranges` 里每个前缀的区间完全一样，
-        它其实就是全局区间的副本（编辑器保存时会这样写）。这种情况下按全局区间重写并
-        丢掉 prefix_ranges，让 start / resume / 「自动更新 start」都回到 `ranges` 这条
-        唯一路径上；各前缀区间确实不同时才保留，并在状态栏说明用的是哪一个。
+        以前这里只对 format 配置生效，普通/顺序配置在界面上改「范围终点」毫无作用；
+        上一版还会把"每个前缀都一样"的 prefix_ranges 收成全局区间，同样违反"绝不修改
+        前缀区间"的约定，这次一并去掉。
         """
         raw = self.range_var.get().strip()
         try:
             end = int(raw)
         except (TypeError, ValueError):
-            end = None
+            return
         en = cfg.setdefault("enumeration", {})
         ranges = en.get("ranges") or [{"start": 0, "end": -1}]
         en["ranges"] = ranges
-        if end is not None:
-            ranges[0]["end"] = end
-        prefix_ranges = en.get("prefix_ranges")
-        if not prefix_ranges:
-            return
-        shape = {(int(p.get("start", 0)), int(p.get("end", -1))) for p in prefix_ranges}
-        if len(shape) == 1:
-            en.pop("prefix_ranges", None)
-            return
+        ranges[0]["end"] = end
         self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，范围终点这一格不生效")
 
     def _start(self):
@@ -2851,6 +2814,11 @@ class Monitor(tk.Tk):
                 resumed = _try_resume(cfg, self._run_result_file, out_dir=ROOT)
                 if resumed is not None:
                     cfg = resumed[0]
+                    # resume 的语义是「先把全局 start 改到读到的位置，再从 start 开跑」：
+                    # 这里把新 start 落盘，本次即使中途退出，下次也从新位置继续，与
+                    # 「自动更新 start」同一口径（都只动全局 start）。
+                    save_config(config_path, cfg)
+                    self._run_last_saved_config = copy.deepcopy(cfg)
             # 记下本次运行的基准：起步时的 config 快照 + **实际**起步位置。
             # 续测生效时 cfg 已被改写，所以这行必须放在续测之后。
             # 结束/停止/关窗时按「续测起点 + 本次处理量」回写，见 _advance_config_start。

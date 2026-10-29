@@ -272,71 +272,21 @@ def _try_resume(cfg: dict, result_file: str, out_dir: str = '.') -> tuple[dict, 
     pidx, last_val = parsed
     print(f"[resume] 最后结果: 前缀[{pidx}] \"{prefixes[pidx]}\"  值={last_val}", file=sys.stderr)
 
-    # 解析原有 prefix_ranges 得到每前缀的原始 start/end
-    pr_cfg = en.get("prefix_ranges")
-    n_pfx = len(prefixes)
-    orig_starts = [0] * n_pfx
-    orig_ends = [int(1e18)] * n_pfx
-    if pr_cfg:
-        idx = 0
-        for pr in pr_cfg:
-            cnt = pr["count"]
-            s = pr.get("start", 0)
-            e = pr.get("end", int(1e18))
-            if e == -1:
-                e = 2**64 - 1
-            for _ in range(cnt):
-                if idx >= n_pfx:
-                    break
-                orig_starts[idx] = s
-                orig_ends[idx] = e
-                idx += 1
-    else:
-        # 无 prefix_ranges → 从 ranges 获取 start/end (兼容 -1 表示无限 / full charset)
-        rng = en.get("ranges", [{}])[0]
-        rng_start = rng.get("start", 0)
-        rng_end = rng.get("end", int(1e18))
-        if rng_end == -1:
-            rng_end = 2**64 - 1
-        for i in range(n_pfx):
-            orig_starts[i] = rng_start
-            orig_ends[i] = rng_end
-
-    # 生成新的 prefix_ranges
-    new_pr = []
-    # 已完成的
-    if pidx > 0:
-        new_pr.append({"count": pidx, "start": 0, "end": 0})
-    # 当前前缀
+    # 新口径：resume 只把「全局 start」改到读到的位置，prefix_ranges 一个字都不动。
+    # 命中的下一个候选就是续测起点；若该前缀已经跑完，to_global 会把它夹到前缀末尾
+    # （即下一个前缀的开头）。
+    from . import sequential
     next_val = last_val + 1
-    if next_val >= orig_ends[pidx]:
-        # 当前前缀也跑完了 → 跳过
-        new_pr.append({"count": 1, "start": 0, "end": 0})
-        desc = f"前缀[{pidx}] \"{prefixes[pidx]}\" 已完成, 跳到[{pidx+1}]"
-        print(f"[resume] {desc}", file=sys.stderr)
-    else:
-        new_pr.append({"count": 1, "start": next_val, "end": orig_ends[pidx]})
-        desc = f"前缀[{pidx}] \"{prefixes[pidx]}\" 从 {next_val} 继续 (共 ~{orig_ends[pidx]})"
-        print(f"[resume] {desc}", file=sys.stderr)
-    # 剩余: 保留每前缀原始 start/end (合并连续相同区间)
-    for j in range(pidx + 1, n_pfx):
-        s = orig_starts[j]
-        e = orig_ends[j]
-        if new_pr and new_pr[-1]["start"] == s and new_pr[-1]["end"] == e and new_pr[-1]["count"] > 0:
-            new_pr[-1]["count"] += 1
-        else:
-            new_pr.append({"count": 1, "start": s, "end": e})
+    new_start = sequential.to_global(cfg, pidx, next_val)
+    desc = (f"前缀[{pidx}] \"{prefixes[pidx]}\" 从 {next_val} 继续；"
+            f"全局 start → {new_start}")
+    print(f"[resume] {desc}", file=sys.stderr)
 
-    # 复制 cfg 并替换 prefix_ranges + 清理 ranges
     import copy
     new_cfg = copy.deepcopy(cfg)
-    new_cfg["enumeration"]["prefix_ranges"] = new_pr
-    # ranges 在 mode=1+prefix_ranges 下不生效, 设为占位值避免混淆
-    new_cfg["enumeration"]["ranges"] = [{"start": 0, "end": 0}]
-
-    # 强制 mode=1 (加上以防修改)
+    ranges = new_cfg["enumeration"].setdefault("ranges", [{}])
+    ranges[0] = dict(ranges[0] or {}, start=new_start)
     new_cfg["enumeration"]["mode"] = 1
-
     return new_cfg, desc
 
 
@@ -358,20 +308,35 @@ def _resume_flex(cfg, result_file, out_dir='.'):
     count = len(task['prefixes'])
     if len(lines) != count + 1:
         raise ValueError('续测检查点不完整')
-    starts = list(map(int, task.get('prefix_range_L', '').split(','))) if 'prefix_range_L' in task else [task['range_L']] * count
-    ends = list(map(int, task.get('prefix_range_R', '').split(','))) if 'prefix_range_R' in task else [task['range_R']] * count
     total = min(2**64-1, __import__('math').prod(len(d)//w for _, w, d in slots))
-    ranges = []
-    for i, line in enumerate(lines[1:]):
+    # 新口径：检查点给出的是每个前缀的连续完成位置（绝对坐标）；把它折算回**全局
+    # start**，prefix_ranges 保持用户填的样子不动。全局坐标按前缀顺序累加，遇到的
+    # 第一个没跑完的前缀决定续测点。
+    from . import sequential
+    layout = sequential.prefix_layout(cfg)
+    if len(layout) != count:
+        raise ValueError('续测检查点与前缀数量不一致')
+    global_start = 0
+    for index, line in enumerate(lines[1:]):
         original, frontier, limit = map(int, line.split())
-        end = min(total, 2**64-1 if ends[i] == -1 else ends[i])
-        start = min(starts[i], end)
-        if not 0 <= original <= frontier <= limit <= total or start < original or end > limit:
+        origin, bound = layout[index]
+        end = total if bound == -1 else min(total, bound)
+        # limit 是上次运行时该前缀的区间上界；它比当前布局还宽，说明检查点不是这份
+        # 配置跑出来的 —— 宁可报错，也不要拿它去算一个不可信的起点。
+        if not 0 <= original <= frontier <= limit <= total or limit > end:
             raise ValueError('续测区间超出检查点覆盖范围，请使用原区间或其子区间')
-        ranges.append({'count': 1, 'start': min(end, max(start, frontier)), 'end': end})
+        if frontier >= limit:
+            global_start += max(0, end - max(0, origin))     # 该前缀已跑完
+        else:
+            global_start += max(0, min(frontier, end) - max(0, origin))
+            break
     result = copy.deepcopy(cfg)
-    result['enumeration']['prefix_ranges'] = ranges
-    desc = '按各前缀连续完成检查点续测；未完成的块重新计算'
+    ranges = result['enumeration'].setdefault('ranges', [{}])
+    # 夹到全局 end：跑完最后一块时累计值可能越过 end（那时前缀区间被 end 截断过），
+    # 但 start 绝不能大于 end —— 否则配置立刻变成"非法区间"，用户无法再编辑。
+    _start, end = sequential.global_bounds(cfg)
+    ranges[0] = dict(ranges[0] or {}, start=min(global_start, end))
+    desc = f'按各前缀连续完成检查点续测；全局 start → {ranges[0]["start"]}'
     print('[resume] ' + desc, file=sys.stderr)
     return result, desc
 
@@ -697,30 +662,43 @@ def _build_task_config(cfg: dict) -> dict:
     tc["range_L"] = rng.get("start", 0)
     tc["range_R"] = rng.get("end", int(1e18))
 
-    # ── Per-prefix ranges (可选): 按枚举区间分配给各前缀 ──
-    pr_cfg = en.get("prefix_ranges")
-    if pr_cfg:
-        pfx_list = tc["prefixes"]
-        total_pfx = len(pfx_list)
-        range_L, range_R = [], []
-        idx = 0
-        for pr in pr_cfg:
-            cnt = pr["count"]
-            s = pr.get("start", 0)
-            e = pr.get("end", int(1e18))
-            if e == -1:
-                e = 2**64 - 1  # 与普通 ranges 一致：-1 表示几乎无限
-            for _ in range(cnt):
-                if idx >= total_pfx:
-                    break
-                range_L.append(str(s))
-                range_R.append(str(e))
-                idx += 1
-        # 校验已在 _validate_config 做过, 此处防御
-        if idx != total_pfx:
-            _die(f"prefix_ranges count 总和 ({idx}) != 前缀总数 ({total_pfx})")
-        tc["prefix_range_L"] = ",".join(range_L)
-        tc["prefix_range_R"] = ",".join(range_R)
+    # ── 顺序模式：全局区间是总控制器，前缀区间只是布局 ──
+    # 把全局 [start, end) 按前缀顺序累加映射成各前缀的绝对区间（见 pbb/sequential.py）。
+    # 映射结果只用于本次任务参数，**绝不写回配置** —— prefix_ranges 永远保持用户填的样子。
+    # 没有 prefix_ranges 时布局默认"每个前缀 = 完整字符集"，所以全局 start 会落在第一个
+    # 前缀里；这与"从全局 start 开始测"一致，也保证 resume 写回的全局坐标能被正确分发。
+    mapped = None
+    if tc["mode"] == 1:
+        from . import sequential
+        mapped = sequential.effective_prefix_ranges(cfg)
+    if mapped is not None:
+        tc["prefix_range_L"] = ",".join(str(low) for low, _high in mapped)
+        tc["prefix_range_R"] = ",".join(str(high) for _low, high in mapped)
+    else:
+        # 退路：算不出总量（字符集表拿不到）时沿用配置里的区间，至少不静默跑空。
+        pr_cfg = en.get("prefix_ranges")
+        if pr_cfg:
+            pfx_list = tc["prefixes"]
+            total_pfx = len(pfx_list)
+            range_L, range_R = [], []
+            idx = 0
+            for pr in pr_cfg:
+                cnt = pr["count"]
+                s = pr.get("start", 0)
+                e = pr.get("end", int(1e18))
+                if e == -1:
+                    e = 2**64 - 1  # 与普通 ranges 一致：-1 表示几乎无限
+                for _ in range(cnt):
+                    if idx >= total_pfx:
+                        break
+                    range_L.append(str(s))
+                    range_R.append(str(e))
+                    idx += 1
+            # 校验已在 _validate_config 做过, 此处防御
+            if idx != total_pfx:
+                _die(f"prefix_ranges count 总和 ({idx}) != 前缀总数 ({total_pfx})")
+            tc["prefix_range_L"] = ",".join(range_L)
+            tc["prefix_range_R"] = ",".join(range_R)
 
     # result_file: 优先 CONFIG_MAP 默认 "result.txt"
     tc["result_file"] = tc.get("result_file", "result.txt")

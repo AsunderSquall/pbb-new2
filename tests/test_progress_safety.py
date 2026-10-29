@@ -43,7 +43,7 @@ class ProgressSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'ROOT', directory):
             owner, path, checkpoint, header = fixture(directory)
             ui.Monitor._periodic_progress_save(owner)
-            self.assertEqual(ui.load_config(str(path))['enumeration']['prefix_ranges'][0]['start'], 12345)
+            self.assertEqual(ui.load_config(str(path))['enumeration']['ranges'][0]['start'], 12345)
             self.assertFalse(owner._run_start_updated)
             checkpoint.write_text(header + '\n0 23456 100000\n', encoding='ascii')
             # A cancelled shutdown must not prevent a later final save.
@@ -51,7 +51,7 @@ class ProgressSafetyTests(unittest.TestCase):
             self.assertFalse(owner._run_start_updated)
             checkpoint.write_text(header + '\n0 34567 100000\n', encoding='ascii')
             owner._advance_config_start()
-            self.assertEqual(ui.load_config(str(path))['enumeration']['prefix_ranges'][0]['start'], 34567)
+            self.assertEqual(ui.load_config(str(path))['enumeration']['ranges'][0]['start'], 34567)
             self.assertTrue(owner._run_start_updated)
 
     def test_disabled_legacy_and_random_do_not_periodically_advance(self):
@@ -100,7 +100,7 @@ print('ready',flush=True)
 time.sleep(60)
 ''', directory)
             saved = ui.load_config(str(Path(directory)/'config.json'))
-            self.assertEqual(saved['enumeration']['prefix_ranges'][0]['start'], 12345)
+            self.assertEqual(saved['enumeration']['ranges'][0]['start'], 12345)
 
     def test_forced_death_before_atomic_replace_preserves_original(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -131,12 +131,12 @@ ui.save_config(Path(sys.argv[1])/'config.json',{'start':999})
                 api.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
                 api.SendMessageW.restype = ctypes.c_ssize_t
                 self.assertEqual(api.SendMessageW(guard.hwnd, 0x11, 0, 0), 1)
-                self.assertEqual(ui.load_config(str(path))['enumeration']['prefix_ranges'][0]['start'], 12345)
+                self.assertEqual(ui.load_config(str(path))['enumeration']['ranges'][0]['start'], 12345)
                 checkpoint.write_text(header + '\n0 23456 100000\n', encoding='ascii')
                 api.SendMessageW(guard.hwnd, 0x16, 0, 0)  # cancelled logout: do not save
-                self.assertEqual(ui.load_config(str(path))['enumeration']['prefix_ranges'][0]['start'], 12345)
+                self.assertEqual(ui.load_config(str(path))['enumeration']['ranges'][0]['start'], 12345)
                 api.SendMessageW(guard.hwnd, 0x16, 1, 0)  # only this test window receives it
-                self.assertEqual(ui.load_config(str(path))['enumeration']['prefix_ranges'][0]['start'], 23456)
+                self.assertEqual(ui.load_config(str(path))['enumeration']['ranges'][0]['start'], 23456)
                 self.assertFalse(owner._run_start_updated)
             finally:
                 guard.close(); window.destroy()
