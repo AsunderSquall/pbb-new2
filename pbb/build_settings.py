@@ -1,9 +1,15 @@
 """Shared, host-local build choices. Portable distribution always starts fresh.
 
-中文: 构建选项的读写模块 —— 本机测速结果(config/build_config.json)的结构定义、
+中文: 构建选项的读写模块 —— 本机测速结果(settings/build_config.json)的结构定义、
 schema 校验与"这份选择现在是否仍然有效"的判定。
 要点: 选择绑定 机器指纹 + 编译器路径 + 源码哈希, 换机器/换编译器/改源码即失效;
 发布包永远只写 fresh()(未测试默认值), 绝不带走打包机器的调优结果。
+
+**目录划分**：`config/` 只放**测号配置**（要测什么），`settings/` 放**应用设置**
+（build_config.json = 本机编译/调优选择、ui_settings.json = 界面偏好）。
+两者混在一个目录时，配置选择器要靠"结构特征"把 build_config.json 挡在外面，
+用户也不容易分清哪个文件是"要测的东西"。旧版本把 build_config.json 放在
+config/ 下，`load()` 仍然读得到（迁移期兼容），但新写入一律进 settings/。
 """
 import hashlib
 import json
@@ -12,7 +18,7 @@ from pathlib import Path
 
 from . import paths
 
-# 默认构建选项(与 config/build_config.fresh.json 的 options 保持一致)。
+# 默认构建选项(与 settings/build_config.fresh.json 的 options 保持一致)。
 # 键集是固定的, load() 会据此逐项校验; 含义:
 #   lto      -flto;  ksa 分段 KSA;  attr 属性 min/max;  copy 编码复制;
 #   unroll  循环展开;  avx2=True 表示强制禁用 AVX-512 退回 AVX2;
@@ -48,15 +54,29 @@ def package_root(base):
 
 
 def config_root(base):
-    # config/ 的位置：包根下的 config/；若包根本身没有 config/（开发仓库尚未建立
+    # 测号配置目录：包根下的 config/；若包根本身没有 config/（开发仓库尚未建立
     # config 目录的兼容情况），就用包根本身。
     base = Path(base)
     outer = package_root(base)
     return outer / "config" if (outer / "config").is_dir() else outer
 
 
+def settings_root(base):
+    """应用设置目录：包根下的 settings/（与测号配置分开，见模块说明）。
+
+    不存在时**不**回退到包根：这里放的是程序自己生成的文件（构建选择、界面偏好），
+    混进包根又会变成"和测号配置混在一起"，正是这次要拆掉的情况。
+    """
+    return package_root(base) / "settings"
+
+
 def config_path(base):
-    # 构建选项的唯一文件名; 开发仓库与发布包都叫 build_config.json。
+    # 构建选择的唯一文件名；新版一律写 settings/build_config.json。
+    return settings_root(base)/'build_config.json'
+
+
+def legacy_config_path(base):
+    """0.x/7.x 时代的位置：config/build_config.json（只读兼容，不再写入）。"""
     return config_root(base)/'build_config.json'
 
 
@@ -80,7 +100,12 @@ def load(base, machine, compiler=None):
     #   4) 传入 compiler 时要求规范化路径完全相同(换编译器失效);
     #   5) source_hashes 非空且每个文件的 sha256 都对得上(改源码失效);
     #      同时拒绝越出 base 的路径, 防止配置里的相对路径指向仓库外。
+    # 位置：先 settings/build_config.json，再退回旧的 config/build_config.json
+    # （迁移期兼容：老包装仍在旧位置，读得到就不必让用户重测）。
     path=config_path(base)
+    if not path.exists():
+        legacy=legacy_config_path(base)
+        if legacy.exists():path=legacy
     if not path.exists():return fresh(),False
     value=json.loads(path.read_text(encoding='utf8'))
     if value.get('version')!=1 or type(value.get('tested')) is not bool:

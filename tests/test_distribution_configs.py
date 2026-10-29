@@ -56,13 +56,17 @@ class DistributionConfigTests(unittest.TestCase):
     def test_outer_config_word_files_and_archive_payload_match(self):
         configs=package_release.distribution_configs()
         self.assertIn('config_words_sequential.yaml',configs)
-        self.assertFalse(json.loads(configs['build_config.json'])['tested'])
+        # 测号配置里不再夹带 build_config.json：它是应用设置，进 settings/。
+        self.assertNotIn('build_config.json',configs)
+        self.assertFalse(json.loads(package_release.distribution_settings()['build_config.json'])['tested'])
         paths.ensure_build_dir()
         with tempfile.TemporaryDirectory(dir=paths.BUILD_DIR) as directory:
             outer=Path(directory)
             package_release.stage_configs(outer)
             cfg=ui.load_config(str(outer/'config/config_words_sequential.yaml'))
             _validate_config(cfg)
+            self.assertTrue((outer/'settings/build_config.json').is_file())
+            self.assertFalse((outer/'config/build_config.json').exists())
             self.assertEqual(cfg['enumeration']['mode'],1)
             self.assertEqual(cfg['prefixes'],[{'name':''}])
             self.assertEqual(cfg['suffixes'],[{'name':''}])

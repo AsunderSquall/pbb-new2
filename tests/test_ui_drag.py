@@ -332,8 +332,8 @@ class AdvanceStartTests(unittest.TestCase):
 
 
 class SearchConfigFilterTests(unittest.TestCase):
-    # config/ 下的 build_config.fresh.json 是**编译选项清单**，不是测号配置，
-    # 必须挡在选择框外（它同样以 .json 结尾，光看扩展名区分不了）。
+    # 编译选项清单（现在放 settings/build_config.json，但用户可能把副本丢进 config/）
+    # 不是测号配置，必须挡在选择框外（它同样以 .json 结尾，光看扩展名区分不了）。
     # 判据用结构特征而非文件名，所以清单改名/新增清单也能挡住。
     def test_build_manifest_is_not_a_search_config(self):
         manifest = {

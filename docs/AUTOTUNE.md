@@ -13,15 +13,15 @@
 
 ## 持久构建配置
 
-发布包最外层 `config/build_config.json` 初始为 `tested: false`、`status: "none"`，其他开关为当前默认值。`config.yaml`、足球配置和配置示例也放在这个 config 文件夹，不放在 source 或 PBBMonitor/_internal 中。开发源码目录未建立 config 文件夹时兼容原根目录位置。未测试时 native 构建使用原有默认参数。普通/UI 引擎通过 `build.py` 读取同一份配置；Python 核心不使用这些引擎优化开关。
+发布包最外层 `settings/build_config.json` 初始为 `tested: false`、`status: "none"`，其他开关为当前默认值。测号配置（`config.yaml`、足球配置和配置示例）放在 `config/`，应用设置（`build_config.json`、`ui_settings.json`）放在 `settings/`；两者都不放在 source 或 PBBMonitor/_internal 中。旧包把 `build_config.json` 放在 `config/` 下，仍然读得到（迁移期兼容），但新写入一律进 `settings/`。未测试时 native 构建使用原有默认参数。普通/UI 引擎通过 `build.py` 读取同一份配置；Python 核心不使用这些引擎优化开关。
 
 测评从有效的已测试配置开始，否则从默认值开始。每接受一项改动，后续候选就以这个累积组合编译和测试，不再分别与最初默认比较。中间状态写入测评目录的 `build_config.progress.json`，不会提前把未完成组合用于正式引擎。最终组合还必须与本轮起点重复确认；不通过就保留起点。
 
-只有完成测试和两个引擎的正确性验证后，才把最终选择写入发布包的 `config/build_config.json`（开发目录兼容原根目录），标记 `tested: true` / `status: "complete"`。没有新增收益时也会记录已测试的起点。配置绑定本机、编译器路径和源码哈希；换机器或源码变化时回到默认参数。`PBB_CXXFLAGS` 仍有最高覆盖优先级。
+只有完成测试和两个引擎的正确性验证后，才把最终选择写入发布包的 `settings/build_config.json`，标记 `tested: true` / `status: "complete"`。没有新增收益时也会记录已测试的起点。配置绑定本机、编译器路径和源码哈希；换机器或源码变化时回到默认参数。`PBB_CXXFLAGS` 仍有最高覆盖优先级。
 
 测试完成后仍须 Rebuild 一遍：默认只发布构建选项，实际引擎必须重建才应用它。可关闭监控器后运行外层 rebuild.bat，或在 UI 勾选 Rebuild 引擎后启动。二进制清单会因选择变化而失效，不需要专用参数启动器。本项目开发源码入口为 start_ui_native.bat。
 
-通用发布包始终写入未测试的默认配置，不能带走打包机器的选择；portable 构建忽略本机选择。监控器 Rebuild 与源码测评共用 `config/build_config.json`。pure 与 environment 是独立组件：已有环境只更新 pure，没有环境时下载两者并将 runtime 放在 source 的同级。
+通用发布包始终写入未测试的默认配置，不能带走打包机器的选择；portable 构建忽略本机选择。监控器 Rebuild 与源码测评共用 `settings/build_config.json`。pure 与 environment 是独立组件：已有环境只更新 pure，没有环境时下载两者并将 runtime 放在 source 的同级。
 
 ## 测试量与预算
 
@@ -81,7 +81,7 @@
 .venv/Scripts/python.exe autotune.py --rollback-from build/autotune/日期_时间
 ```
 
-回退拒绝覆盖安装后再修改的文件。只发布配置、没有安装时，可将本轮 build_config.before.json 恢复到发布包的 config/build_config.json（开发目录原根位置），然后 Rebuild。同一结果目录只能安装一次。
+回退拒绝覆盖安装后再修改的文件。只发布配置、没有安装时，可将本轮 build_config.before.json 恢复到发布包的 settings/build_config.json，然后 Rebuild。同一结果目录只能安装一次。
 
 2026-10-09 新流程的隔离试跑输入6.1 T/day、1分钟：实际测试57.4秒、编译32.5秒、总耗时102.3秒；初始单任务枚举范围7300万。最终组合确认未通过，保留原配置，正式引擎未替换。记录在 `build/autotune/20261009_173503/`。这是短预算流程验证，不是新增优化的性能结论。
 

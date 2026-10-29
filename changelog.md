@@ -22,7 +22,7 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 - **词族配置写死开发机绝对路径**：`config/config_words_sequential.yaml` 的四个 `file:` 写成 `D:\namerena\files\...`，随包到别的机器必然加载失败（`tests/test_distribution_configs.py` 因此失败）。按 `docs/PACKAGING.md` 改回 `../charsets/`。
 - **配置选择器打开编辑器再关闭后界面卡死数秒**：`<Destroy>` 会沿 bindtags 冒泡，编辑器里**每一个子控件**销毁都会触发一次收尾回调（足球配置的编辑器有 158 个后代控件），旧代码每次都在 `after(50)` 里做 `grab_set` + 整表重建（重新读取并解析 `config/` 下全部配置、再算字符集大小）。现在只认编辑器顶层本身、每个编辑器只收尾一次；实测关闭后 `refresh` 与 `grab_set` 各 1 次。
 - **测完的配置无法再编辑**：`enumeration.ranges[].end == start` 被「必须 > start」拒绝，而「自动更新 start」测完正好把 start 推到 end。现在空区间合法（`end < start` 仍拒绝），`prefix_ranges` 同样放宽。
-- **前缀名字里带换行会让后面的前缀静默不测**：引擎参数按行/逗号分隔且不转义，前缀名含换行时 `prefixes=` 那一行被截断——现场（`test-shunxu.toml`，3 个前缀）实际只跑了 2 个，第 3 个一个候选都没测。现在校验阶段明确拒绝逗号、换行、回车、制表符与 NUL，并说明原因。
+- **前缀名字里带换行会让后面的前缀静默不测**：引擎参数按行/逗号分隔且不转义，前缀名含换行时 `prefixes=` 那一行被截断——现场（`test-shunxu.toml`，3 个前缀）实际只跑了 2 个，第 3 个一个候选都没测。根因是**单行输入框里看不见的换行**：往 Tk 的 Entry 粘贴多行文本时，换行/制表符会原样写进 StringVar，界面上完全看不出来。现在前后缀名、队伍名、结果文件名的输入框"写入即清洗"（键入、粘贴、代码赋值都覆盖，按回车也不会留下隐形回车），落盘前再兜一次；配置校验仍拒绝逗号、换行、回车、制表符与 NUL（手写配置会得到明确报错）。
 - **保存配置会吃掉队伍名的首尾空格**：`_editor_config` 对 `team_name` 做了 `.strip()`。改为原样保存；首尾空格在 YAML/JSON/TOML 三种格式下都能往返（新增用例）。
 - **深色模式下配置选择器表格仍是白底**：`ttk.Treeview` 不跟随 `TFrame`/`TLabel`，现在表格、表头与选中行都按主题着色。
 - **顺序模式的全局区间、start 不生效**：①主窗口「范围终点」以前只对 format 配置生效，普通/顺序配置改了没用；②编辑器保存时总会写一份与全局相同的 `prefix_ranges`，把全局区间和「自动更新 start」那条路径盖住；③「自动更新 start」只推进 `ranges`。现在：范围终点对所有模式生效；各前缀区间完全相同时收成全局区间（确实不同才保留 `prefix_ranges`，并在状态栏说明）；带 `prefix_ranges` 的顺序任务按完成位置回写 start，拿不到可信位置时保持原样并提示。
@@ -30,17 +30,19 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 
 ### 新增
 
-- **启动默认配置**：配置选择器的「设为启动默认」把选中文件名写进 `config/ui_settings.json`，打开界面即加载它；文件缺失时按 `config.yaml` → `config_football.yaml` → 第一个可用配置回退。
+- **启动默认配置**：配置选择器的「设为启动默认」把选中文件名写进 `settings/ui_settings.json`，打开界面即加载它；文件缺失时按 `config.yaml` → `config_football.yaml` → 第一个可用配置回退。
 - **保存后的确认弹窗**：编辑配置保存后提示已保存，两个按钮「继续编辑」/「退出编辑」（关闭窗口或 Esc 视为继续编辑，避免误关编辑现场）。
 
 ### 变更
 
+- **测号配置与应用设置分目录**：`config/` 只放**测号配置**（要测什么），新增 `settings/` 放**应用设置**——`build_config.json`（本机编译/调优选择）与 `ui_settings.json`（界面偏好）。发布包布局同步为 `PBB/config/` + `PBB/settings/`，`stage_configs()` 改为"先清后写"，保证两类文件各就各位、不互相残留。旧包把 `build_config.json` 放在 `config/` 下，**仍能读到**（迁移期兼容，`build_settings.legacy_config_path`），但新写入一律进 `settings/`；仓库里的模板移到 `settings/build_config.fresh.json`。
 - tune 启动时同时输出本机可用逻辑CPU数；配置显式指定的线程数超过它时打印警告（显式配置仍优先，不代改），并把实际线程数与可用逻辑CPU分别记入 `environment.json`、`selection.json`、`REPORT.md`。
 
 ### 文档
 
 - `docs/AUTOTUNE.md` 补「测量噪声与判定力度」：真实引擎实测的单次测量抖动、开局虚高幅度，以及 `choose()` 在 0%/0.3%/1%/2% 收益上的判定概率；同时说明候选数不足「线程数 × 100 万」时线程跑不满、`speed` 会被低估，以及随包配置为什么必须是 `-1`。
 - README 补充：前后缀/队伍名的禁用字符、空区间语义、启动默认配置的位置与回退顺序。
+- README、REPO.md、`docs/PACKAGING.md`、`docs/AUTOTUNE.md` 同步「测号配置在 `config/`、应用设置在 `settings/`」的目录划分与发布包布局（`PBB/config/` + `PBB/settings/`）。
 
 ---
 

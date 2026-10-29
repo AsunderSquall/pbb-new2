@@ -32,9 +32,12 @@ from _archive import write_zip_atomic
 ROOT = paths.REPO_ROOT
 
 DIST_DIR = "dist_releases/" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-CONFIG_NAMES = {'build_config.json', 'config.yaml', 'config.json', 'config.toml',
+CONFIG_NAMES = {'config.yaml', 'config.json', 'config.toml',
                 'config_football.yaml', 'config.example.yaml', 'config.example.json', 'config.example.toml',
                 'config_flex.example.yaml', 'config_words_sequential.yaml'}
+# 应用设置：和测号配置分开放（config/ 只放"要测什么"，settings/ 放程序自己的选择/偏好）。
+# build_config.fresh.json 是仓库里的模板，随包只带一份未测试的 build_config.json。
+SETTINGS_NAMES = {'build_config.json', 'build_config.fresh.json', 'ui_settings.json'}
 CHARSET_NAMES = ('adjectives.txt', 'nouns.txt', 'adverbs.txt', 'verbs.txt')
 
 # 文档目录：AUTOTUNE.md、PACKAGING.md 等开发/打包说明放在这里。
@@ -88,38 +91,53 @@ def check_inputs():
 
 
 def distribution_configs():
-    """生成发布包 config/ 目录里的全部配置内容（名称 → 字节内容）。"""
+    """生成发布包 config/ 目录里的全部**测号配置**（名称 → 字节内容）。"""
     config_dir = build_settings.config_root(ROOT)
-    # 除 config.yaml 与 build_config.json 外的配置：示例、足球配置等，按原样带出。
+    # 除 config.yaml 外的配置：示例、足球配置等，按原样带出。
     configs = {name: source_payload(config_dir / name) for name in CONFIG_NAMES
-               if name not in ('config.yaml', 'config.json', 'config.toml', 'build_config.json')
+               if name not in ('config.yaml', 'config.json', 'config.toml')
                and (config_dir / name).is_file()}
     if not (config_dir / 'config_football.yaml').is_file():
         raise SystemExit(f"Missing {config_dir / 'config_football.yaml'}: the shipped config.yaml is generated from it.")
     # 发布的 config.yaml 由足球配置生成（README.md 有说明）。
     configs['config.yaml'] = (config_dir / 'config_football.yaml').read_bytes()
-    # 始终带出一份「未测试」的 build_config.json：本机那份可能不存在
-    # （开发仓库只保留 build_config.fresh.json），也可能带着本机的测速结论，
-    # 那种结论绝不能带到别的 CPU 上。
-    configs['build_config.json'] = source_payload(config_dir / 'build_config.json')
     return configs
 
 
+def distribution_settings():
+    """生成发布包 settings/ 目录的内容。
+
+    只带一份「未测试」的 build_config.json：本机那份可能带着测速结论，那种结论绝不能
+    带到别的 CPU 上；ui_settings.json 是用户自己的偏好，不在发布包里预置。
+    """
+    return {'build_config.json': (json.dumps(build_settings.fresh(), indent=2) + '\n').encode()}
+
+
 def stage_configs(root):
-    """把可编辑配置集中到外层 config/ 目录，并清掉其它位置的同名副本。
+    """把可编辑配置集中到外层 config/（测号配置）与 settings/（应用设置）。
 
     ``root`` 是外层包根。开发仓库里它就是仓库根；发布布局里源码在 ``root/source``。
-    两种形态都清理一遍，保证归档里不会残留第二份可编辑配置。
+    先清残留再写：测号配置只允许留在 ``config/``、应用设置只允许留在 ``settings/``；
+    包根、源码目录、冻结监控器和对方目录里的同名副本一律删掉，这样归档里不会出现
+    第二份配置，也不会把旧的 ``config/build_config.json`` 带到新包里
+    （升级包仍从旧位置读，见 build_settings.load）。
     """
     (root / 'config').mkdir(parents=True, exist_ok=True)
+    (root / 'settings').mkdir(parents=True, exist_ok=True)
+    # 先全清再写：结果恰好是分发包那套文件，旧版本残留的 config.json/config.toml 之类
+    # 不会跟着进新包；两个目录还互为对方名的清理对象（config/ 里不留 build_config.json，
+    # settings/ 里不留测号配置）。
+    for directory in (root, root / 'source', root / 'PBBMonitor/_internal',
+                      root / 'config', root / 'settings'):
+        for name in CONFIG_NAMES | SETTINGS_NAMES:
+            (directory / name).unlink(missing_ok=True)
     for name, data in distribution_configs().items():
         (root / 'config' / name).write_bytes(data)
+    for name, data in distribution_settings().items():
+        (root / 'settings' / name).write_bytes(data)
     (root / 'charsets').mkdir(parents=True, exist_ok=True)
     for name, data in distribution_charsets().items():
         (root / 'charsets' / name).write_bytes(data)
-    for directory in (root, root / 'source', root / 'PBBMonitor/_internal'):
-        for name in CONFIG_NAMES:
-            (directory / name).unlink(missing_ok=True)
 
 
 def distribution_charsets():
@@ -199,10 +217,12 @@ def source_paths():
 
 
 def source_payload(path):
-    """读取单个文件的发布内容；build_config.json 一律换成未测试的默认值。"""
-    # 绝不把本机的测速结论发给别的 CPU。
-    return (json.dumps(build_settings.fresh(), indent=2) + '\n').encode() \
-        if path.name == 'build_config.json' else path.read_bytes()
+    """读取单个测号配置的发布内容（原样带出）。
+
+    构建选择不再走这里：它属于应用设置，由 distribution_settings() 统一换成未测试的
+    默认值，绝不把本机的测速结论发给别的 CPU。
+    """
+    return path.read_bytes()
 
 
 def check_frozen_monitor(monitor: Path) -> None:
@@ -281,9 +301,9 @@ def main():
     # 组装 pure 包：监控器目录 + 源码 + 配置 + 外壳脚本，全部放进 PBB/ 前缀。
     # write_zip_atomic 负责"先写临时文件再原子替换 + 锁重试"，见 tools/_archive.py。
     def fill(archive):
-        # 冻结的监控器包（跳过其中的配置，配置统一由 config/ 提供）。
+        # 冻结的监控器包（跳过其中的配置，配置统一由 config/ 与 settings/ 提供）。
         for path in monitor.rglob("*"):
-            if path.is_file() and path.name not in CONFIG_NAMES:
+            if path.is_file() and path.name not in CONFIG_NAMES | SETTINGS_NAMES:
                 archive.write(path, Path("PBB") / path.relative_to(DIST_DIR))
         # 顶层说明文档：Markdown 与其导出的 PDF 一起带出。
         for md_path, pdf_path in PDF_SOURCES:
@@ -292,11 +312,13 @@ def main():
         archive.write(f"{DOCS_DIR}/PACKAGING.md", "PBB/PACKAGING.md")
         # 源码与资源：改写到发布包的 source/ 目录下，保持仓库内相对结构。
         for path in source_paths():
-            if path.name not in CONFIG_NAMES:
+            if path.name not in CONFIG_NAMES | SETTINGS_NAMES:
                 archive.writestr(str(Path("PBB/source") / path).replace('\\', '/'), source_payload(path))
-        # 可编辑配置统一放在外层 config/。
+        # 测号配置放外层 config/，应用设置（未测试的构建选择）放外层 settings/。
         for name, data in distribution_configs().items():
             archive.writestr('PBB/config/' + name, data)
+        for name, data in distribution_settings().items():
+            archive.writestr('PBB/settings/' + name, data)
         for name, data in distribution_charsets().items():
             archive.writestr('PBB/charsets/' + name, data)
         # 发布包根目录的外壳脚本（start_ui/start_cli/rebuild/environment/tune_*）。

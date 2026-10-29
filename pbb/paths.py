@@ -53,7 +53,8 @@ DATA_ROOT = _SELF if _FROZEN else REPO_ROOT
 BUILD_DIR = DATA_ROOT / "build"          # 编译产物：引擎、pbb_core、autotune 记录
 FONTS_DIR = DATA_ROOT / "fonts"
 ASSETS_DIR = DATA_ROOT / "assets"
-CONFIG_DIR = DATA_ROOT / "config"
+CONFIG_DIR = DATA_ROOT / "config"        # 测号配置（要测什么）
+SETTINGS_DIR = DATA_ROOT / "settings"    # 应用设置：build_config.json / ui_settings.json
 NATIVE_DIR = PACKAGE_DIR / "native"      # C++ 源码：engine_main.cpp、filter 对拍、src/
 
 # 默认头文件树（PBB_SRC_DIR 为空时的选择）与默认桥接源码。

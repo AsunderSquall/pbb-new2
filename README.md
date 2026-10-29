@@ -127,7 +127,9 @@ src/
 - `output`：文件名、是否输出分数、日志和速度设置。
 - `threads.worker_threads`：启动线程数，`-1` 表示自动检测逻辑 CPU 数。
 
-配置选择器里有「设为启动默认」：把当前选中配置的文件名记进 `config/ui_settings.json`，之后打开界面就直接加载它；文件不存在时按 `config.yaml` → `config_football.yaml` → 第一个可用配置的顺序回退。
+配置选择器里有「设为启动默认」：把当前选中配置的文件名记进 `settings/ui_settings.json`，之后打开界面就直接加载它；文件不存在时按 `config.yaml` → `config_football.yaml` → 第一个可用配置的顺序回退。
+
+**两类文件分开放**：`config/` 只放**测号配置**（要测什么：队伍、前后缀、字符集、枚举范围、阈值……）；`settings/` 放**应用设置**——`build_config.json`（本机编译/调优选择）与 `ui_settings.json`（界面偏好）。旧包装把 `build_config.json` 放在 `config/` 下，仍然读得到，但新写入一律进 `settings/`。
 
 发布时 `config.yaml` 由足球配置生成。当前普通阈值为 QP5400、QD6200、PP8000、PD8800、CQD4000、CP4100、FP4200、WC4000、FS3900、PJ4100；潜力阈值为 CP4500、FP4600、WC4400、FS4300、PJ4500。其他初筛条件由当前评分源码决定。自动优化不修改这些门控或收集规则。
 
@@ -169,13 +171,13 @@ UI 字符类型是多选，至少选一项。选择自定义或 Unicode 类型�
 
 输入速度只用于规划测试量：初始按输入吞吐量的90%估算，范围取整到一百万的倍数，至少一百万。编译时间另计。期望分钟数是软目标，超出后继续完成计划测试及最终确认；错误或用户中断不会发布未完成选择。
 
-默认比较 UI 引擎完整任务性能，并验证普通引擎正确性。结果、参数、输出、哈希、逐轮速度和报告在 `source/build/autotune/日期_时间/`；不写生产结果文件。成功后更新外层 `config/build_config.json`，初始状态为 `tested: false`、`status: "none"`。
+默认比较 UI 引擎完整任务性能，并验证普通引擎正确性。结果、参数、输出、哈希、逐轮速度和报告在 `source/build/autotune/日期_时间/`；不写生产结果文件。成功后更新外层 `settings/build_config.json`，初始状态为 `tested: false`、`status: "none"`。
 
 选择绑定机器、编译器路径和源码哈希。换机器或相关源码变化后会回到默认参数。`build.py` 在 GCC native 普通/UI 构建中使用有效选择；Python 字符集模块和 portable 模式不采用这些优化开关。
 
 发布引擎使用保守 x86-64 基础指令集。本机 native 构建可以使用 CPU 支持的 SIMD；默认 GCC 引擎含 LTO、分段 KSA、属性 min/max 和编码复制优化，实际收益因机器和任务而异。显式 `PBB_CXXFLAGS` 覆盖默认编译参数；随包 `rebuild.bat` 调用的重建脚本会清除此覆盖，按本机配置重建。
 
-回退本轮仅保存的选择：关闭引擎，将测试目录中的 `build_config.before.json` 恢复到外层 `config/build_config.json`，然后重新 Rebuild。通过自动测试高级安装选项替换二进制的回退方法见 `AUTOTUNE.md`。
+回退本轮仅保存的选择：关闭引擎，将测试目录中的 `build_config.before.json` 恢复到外层 `settings/build_config.json`，然后重新 Rebuild。通过自动测试高级安装选项替换二进制的回退方法见 `AUTOTUNE.md`。
 
 ## UI 运行与输出
 

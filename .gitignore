@@ -129,8 +129,10 @@ README.pdf
 # 故意忽略：
 #   config/config.yaml        由 tools/package_release.distribution_configs()
 #                             从 config_football.yaml 生成（README.md:127）
-#   config/build_config.json  本机测速结果；模板是 build_config.fresh.json，
+#   settings/build_config.json 本机测速结果（应用设置，和测号配置分开放）；
+#                             模板是 settings/build_config.fresh.json，
 #                             打包时始终替换成 build_settings.fresh()
+#   settings/ui_settings.json  界面偏好（启动默认配置等），本机自己的，不进仓库
 #   config/sby.toml           个人车队/前缀配置，不在 CONFIG_NAMES 里，打包不读
 # -----------------------------------------------------------------------------
 *.yaml
@@ -154,7 +156,7 @@ README.pdf
 !config/config_football.yaml
 
 # 放行：未测试的构建选项模板（对应 build_settings.fresh()）
-!config/build_config.fresh.json
+!settings/build_config.fresh.json
 
 # 放行：必须纳入版本控制的生成物参考
 #   environment.json             tools/package_offline.py 写进 environment 包

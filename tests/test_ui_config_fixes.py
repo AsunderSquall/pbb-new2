@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import tkinter as tk
 import types
 import unittest
 from unittest.mock import patch
@@ -168,6 +169,31 @@ class WhitespaceRoundTripTests(unittest.TestCase):
                     self.assertEqual([p['name'] for p in back['prefixes']], [' 前 ', 'a b'])
                     self.assertEqual([s['name'] for s in back['suffixes']], [' 后'])
                     self.assertEqual(back['team_name'], ' 队 ')
+
+
+class SingleLineInputTests(unittest.TestCase):
+    """单行输入框里不能留下看不见的换行（反馈：粘贴多行/按回车后配置里藏了 \\n）。"""
+
+    def test_single_line_text_drops_control_characters_but_keeps_spaces(self):
+        self.assertEqual(ui.single_line_text(' 前\n缀\t '), ' 前缀 ')
+        self.assertEqual(ui.single_line_text('a\r\nb'), 'ab')
+        self.assertEqual(ui.single_line_text('a\x00b'), 'ab')
+        self.assertIsNone(ui.single_line_text(None))
+
+    def test_string_var_cleans_on_every_write(self):
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            var = tk.StringVar(master=root, value='')
+            ui.sanitize_single_line(var)
+            var.set('前\n缀')          # 等价于粘贴多行文本
+            root.update()
+            self.assertEqual(var.get(), '前缀')
+            var.set(' 后 ')            # 空格仍然保留
+            root.update()
+            self.assertEqual(var.get(), ' 后 ')
+        finally:
+            root.destroy()
 
 
 if __name__ == '__main__':

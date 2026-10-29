@@ -36,6 +36,8 @@ from .threading_config import available_threads, resolve_threads
 # 字体、图标、build/ 都在它下面（config/ 走 build_settings.config_root）。
 ROOT = str(paths.DATA_ROOT)
 CONFIG_DIR = str(build_settings.config_root(ROOT))
+# 应用设置（ui_settings.json、build_config.json）与测号配置分开放（见 build_settings 模块说明）。
+SETTINGS_DIR = str(build_settings.settings_root(ROOT))
 UI_FONT = "等距更纱黑体 SC"
 # 字体与图标的绝对路径统一由 pbb/paths.py 给出，PyInstaller 打包后同样解析到 _internal/ 下。
 UI_FONT_FILE = str(paths.FONT_FILE)
@@ -208,13 +210,14 @@ def save_config(path, cfg):
 
 
 # 界面自己的设置（与测号配置分开：它不是测号参数，也不该出现在配置选择器的表格里）。
+# 和 build_config.json 一起放在 settings/ 下（见 build_settings 模块说明）。
 # 现在只存「启动时默认加载哪个配置」，以后加界面偏好也放这里。
 UI_SETTINGS_NAME = "ui_settings.json"
 
 
 def ui_settings_path() -> str:
-    """界面设置文件路径（config/ 下，与配置文件同目录方便随包迁移）。"""
-    return os.path.join(CONFIG_DIR, UI_SETTINGS_NAME)
+    """界面设置文件路径（settings/ 下，和 build_config.json 同一目录）。"""
+    return os.path.join(SETTINGS_DIR, UI_SETTINGS_NAME)
 
 
 def load_ui_settings() -> dict:
@@ -231,6 +234,7 @@ def load_ui_settings() -> dict:
 def save_ui_settings(values: dict) -> None:
     """原子写入界面设置（先 .tmp 再替换，避免半截文件让下次启动读不出来）。"""
     path = ui_settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".tmp"
     try:
         with open(temporary, "w", encoding="utf-8") as fh:
@@ -495,6 +499,40 @@ class SimpleTextValue:
             self.widget.insert("1.0", str(value))
 
 
+# 单行输入里不该出现、而且肉眼完全看不见的字符。粘贴多行文本时 Tk 的 Entry 会把这些
+# 字符原样塞进 StringVar（界面上看不出来），它们再一路写进配置，最后在引擎的
+# `key=value` / 逗号分隔协议里把后面的前缀切走（见 main._check_name_text）。
+# 所以单行输入框一律"写入即清洗"：按回车或粘贴多行都直接丢掉换行。
+_INVISIBLE_CHARS = ('\r', '\n', '\t', '\0')
+
+
+def single_line_text(value):
+    """去掉单行输入里不该出现的控制字符（换行/回车/制表符/NUL）。"""
+    if not isinstance(value, str):
+        return value
+    for char in _INVISIBLE_CHARS:
+        value = value.replace(char, '')
+    return value
+
+
+def sanitize_single_line(var) -> None:
+    """给 StringVar 挂上"写入即清洗"：粘贴进来的换行不会留在框里。
+
+    用 trace 而不是校验回调，是因为粘贴（<<Paste>>）不走 validatecommand；trace 在
+    变量层面兜住所有写入路径（键入、粘贴、代码赋值）。
+    """
+    def clean(*_args):
+        try:
+            raw = var.get()
+        except tk.TclError:
+            return
+        cleaned = single_line_text(raw)
+        if cleaned != raw:
+            var.set(cleaned)
+
+    var.trace_add('write', clean)
+
+
 def ask_continue_editing(parent, filename: str) -> bool:
     """保存成功后的确认框：两个按钮「继续编辑」「退出编辑」。
 
@@ -655,9 +693,10 @@ class ConfigSelector(tk.Toplevel):
     def is_search_config(cls, cfg) -> bool:
         """判断一份文件是不是「测号配置」。
 
-        为什么需要：config/ 下还放着 ``build_config.fresh.json`` —— 那是**编译选项清单**
-        （version/options/source_hashes/machine/compiler/result），根本不是测号配置，
-        却因为同样是 .json 而被列进选择框，白占一行还可能被误选。
+        为什么需要：即使已经把应用设置挪到 settings/（build_config.json、
+        ui_settings.json），用户仍可能把编译选项清单之类的东西放进 config/ —— 那是
+        （version/options/source_hashes/machine/compiler/result）的**编译清单**，
+        根本不是测号配置，却因为同样是 .json 而被列进选择框，白占一行还可能被误选。
 
         判据用**结构特征而不是文件名**：测号配置必然有 character_set / prefixes /
         suffixes / enumeration / collection 这几个 section，而编译清单一个都没有。
@@ -1733,7 +1772,8 @@ class Monitor(tk.Tk):
         drag.grid(row=0, column=0, padx=(0, 4))
         index = ttk.Label(row_frame, width=3, anchor="e")
         index.grid(row=0, column=1, padx=(0, 8))
-        name_var = tk.StringVar(value="" if name == "+" else str(name))
+        name_var = tk.StringVar(value=single_line_text("" if name == "+" else str(name)))
+        sanitize_single_line(name_var)
         start_var = tk.StringVar(value=str(start))
         end_var = tk.StringVar(value=str(end))
         index_entry = ttk.Entry(row_frame, textvariable=name_var, width=12)
@@ -1771,7 +1811,8 @@ class Monitor(tk.Tk):
         drag.grid(row=0, column=0, padx=(0, 4))
         index = ttk.Label(row_frame, width=4, anchor="e")
         index.grid(row=0, column=1, padx=(0, 8))
-        name_var = tk.StringVar(value="" if name == "+" else str(name))
+        name_var = tk.StringVar(value=single_line_text("" if name == "+" else str(name)))
+        sanitize_single_line(name_var)
         ttk.Entry(row_frame, textvariable=name_var, width=12).grid(row=0, column=2, sticky="ew", padx=(0, 8))
         row = {"frame": row_frame, "index": index, "name": name_var}
         ttk.Button(row_frame, text="删除", command=lambda: self._remove_suffix_row(row)).grid(row=0, column=3)
@@ -1865,10 +1906,11 @@ class Monitor(tk.Tk):
         name, start, end = prefix if prefix is not None else ("+", "0", "-1")
         row = {"frame": frame, "index": index, "prefix_exists": prefix is not None,
                "suffix_exists": suffix is not None,
-               "prefix": tk.StringVar(value="" if name == "+" else name),
-               "suffix": tk.StringVar(value="" if suffix in (None, "+") else suffix),
+               "prefix": tk.StringVar(value=single_line_text("" if name == "+" else name)),
+               "suffix": tk.StringVar(value=single_line_text("" if suffix in (None, "+") else suffix)),
                "start": tk.StringVar(value=start), "end": tk.StringVar(value=end)}
         for column, key in ((2, "prefix"), (3, "suffix")):
+            sanitize_single_line(row[key])
             ttk.Entry(frame, textvariable=row[key], width=18).grid(row=0, column=column, sticky="ew", padx=(0, 6))
         range_widgets = []
         for column, key in ((4, "start"), (5, "end")):
@@ -2011,7 +2053,9 @@ class Monitor(tk.Tk):
 
         def field(parent, row, label, key, value, column=0, width=26):
             ttk.Label(parent, text=label).grid(row=row, column=column * 2, sticky="w", padx=(0, 8), pady=6)
-            var = tk.StringVar(value=str(value))
+            var = tk.StringVar(value=single_line_text(str(value)))
+            # 单行输入：粘贴进的换行/制表符直接丢掉，不留在框里（见 sanitize_single_line）
+            sanitize_single_line(var)
             self.editor_vars[key] = var
             entry = ttk.Entry(parent, textvariable=var, width=width)
             entry.grid(row=row, column=column * 2 + 1, sticky="ew", pady=6)
@@ -2255,7 +2299,8 @@ class Monitor(tk.Tk):
                            state="readonly", width=12)
         box.grid(row=0, column=0, sticky="ew")
 
-        name_var = tk.StringVar(value="" if raw in ("+", "-") else raw)
+        name_var = tk.StringVar(value=single_line_text("" if raw in ("+", "-") else raw))
+        sanitize_single_line(name_var)
         self.editor_vars["output.result_file.name"] = name_var
         entry = ttk.Entry(holder, textvariable=name_var, width=30)
         entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
@@ -2346,17 +2391,19 @@ class Monitor(tk.Tk):
         cfg = copy.deepcopy(self.editor_cfg)
         def integer(key):
             return int(self.editor_vars[key].get().strip())
-        # 原样保存：首尾空格是用户显式输入的（游戏里确实可能带空格）。会破坏参数协议
-        # 的字符（换行/制表符/逗号）由 _validate_config 明确拒绝，不在这里静默改写。
-        self._set_cfg_value(cfg, "team_name", self.editor_vars["team_name"].get())
+        # 原样保存首尾空格（游戏里确实可能带空格）；看不见的控制字符在控件写入时就已经
+        # 丢掉，这里再兜一次，保证落盘的值干净。
+        self._set_cfg_value(cfg, "team_name", single_line_text(self.editor_vars["team_name"].get()))
         for key in ("threads.worker_threads", "enumeration.variable_length"):
             self._set_cfg_value(cfg, key, integer(key))
         mode = self.editor_choice_maps["enumeration.mode"][self.editor_vars["enumeration.mode"].get()]
         self._set_cfg_value(cfg, "enumeration.mode", mode)
         cfg["enumeration"]["ranges"] = [{"start": integer("range.start"), "end": integer("range.end")}]
         prefixes, suffixes = self._affix_editor_data()
-        cfg["prefixes"] = [{"name": name} for name, _, _ in prefixes]
-        cfg["suffixes"] = [{"name": name} for name in suffixes]
+        # 兜底：即使有路径绕过控件的写入清洗（旧配置、代码赋值），落盘前也不留看不见的
+        # 控制字符 —— 它们是引擎参数协议与结果文件的分隔符（见 main._check_name_text）。
+        cfg["prefixes"] = [{"name": single_line_text(name)} for name, _, _ in prefixes]
+        cfg["suffixes"] = [{"name": single_line_text(name)} for name in suffixes]
         if mode == 1:
             # 所有前缀填的区间完全一样时，它等价于「全局区间」：只写 ranges、不写
             # prefix_ranges。否则那份副本会一直盖住全局区间，start / resume /

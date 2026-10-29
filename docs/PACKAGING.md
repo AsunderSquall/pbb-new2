@@ -10,13 +10,14 @@ Selecting Rebuild compiles a host-optimized engine using an installed compiler.
 The Python extension remains the conservative release build. A compiler is not
 required for normal use of the executable package.
 
-The pure ZIP contains PBBMonitor/, source/, config/ and launchers; source/build/
+The pure ZIP contains PBBMonitor/, source/, config/ (search configs),
+settings/ (build choice and UI preferences) and launchers; source/build/
 contains the portable ordinary/UI engines and Python core. The independent
 environment ZIP contains only runtime/ (complete Python and GCC), licenses and
 README_ENVIRONMENT.md. It is a reusable component, not a delta or an application
 bundle. Existing environment users only update pure; new full-feature users
 extract both ZIPs into the same parent directory, merging their PBB/ folders.
-runtime/, source/, config/ and PBBMonitor/ must be siblings. Users with a compiler
+runtime/, source/, config/, settings/ and PBBMonitor/ must be siblings. Users with a compiler
 are strongly encouraged to Rebuild once on their own machine for performance.
 The pure package also includes charsets/ beside config/. The supplied
 config_words_sequential.yaml references these four word lists with ../charsets/;
@@ -67,10 +68,11 @@ test duration in minutes. Compilation is timed separately and excluded from
 this soft target; testing continues after it expires. Recommended duration is
 20 minutes. Initial candidate volume uses 90% of the entered throughput.
 A completed run publishes the cumulative, verified selection to
-config/build_config.json. All editable configs are in the outer PBB/config/:
-config.yaml, config_football.yaml, config.example.* and build_config.json.
+settings/build_config.json. Search configs (config.yaml, config_football.yaml,
+config.example.*) live in the outer PBB/config/; app settings
+(build_config.json, ui_settings.json) live in PBB/settings/.
 There are no extra config copies in source/ or PBBMonitor/_internal/.
-Native Rebuild reads config/build_config.json for both ordinary and UI engines.
+Native Rebuild reads settings/build_config.json for both ordinary and UI engines.
 Testing alone does not install engines: users must Rebuild afterward to apply it.
 Machine/compiler/source
 checks prevent another host from silently using the selection. See AUTOTUNE.md

@@ -9,7 +9,7 @@ Not meant to be run directly — use ./run.sh or run.bat.
 由 main.py 通过 ensure_all(rebuild, verbose) 调用, 不作为独立脚本直接运行;
 真正需要编译时走 ./run.sh 或 run.bat(它们会先补齐 Python 依赖)。
 编译决策顺序: 环境变量 (PBB_BUILD_MODE / PBB_CXXFLAGS / PBB_SRC_DIR) >
-本机测速结果 (config/build_config.json) > CPU 与编译器自动探测。
+本机测速结果 (settings/build_config.json) > CPU 与编译器自动探测。
 """
 import os, sys, shutil, subprocess, tempfile, sysconfig
 import glob, hashlib, json, platform
@@ -17,7 +17,7 @@ from functools import lru_cache
 
 from . import build_settings, paths
 
-# BASE_DIR 保留为"仓库根"的别名：构建选项（config/build_config.json）以它为基准定位，
+# BASE_DIR 保留为"仓库根"的别名：构建选项（settings/build_config.json）以它为基准定位，
 # 编译器命令行也在 chdir 到这里之后执行，因此它必须与 package_release.py 的
 # os.chdir 目标一致。真实定义已收拢到 pbb/paths.py，此处不再自己用 __file__ 推导 ——
 # 本模块在 pbb/ 包里，用 __file__ 推导会算成 pbb/ 而不是仓库根。

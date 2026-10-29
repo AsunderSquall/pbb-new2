@@ -23,11 +23,11 @@ from pbb import paths as _paths
 _paths.ensure_build_dir()
 
 class ConfigLocationTests(unittest.TestCase):
-    # 本组用例守护“配置只有一份、且永远在外层 config/”这条布局约定，以及编辑器
+    # 本组用例守护“每类配置只有一份、且永远在外层”这条布局约定，以及编辑器
     # 保存配置时的目标选择和格式保持。
-    # 发布布局里源码在内层 source/，但构建配置必须始终写在外层 config/build_config.json，
+    # 发布布局里源码在内层 source/，但构建配置必须始终写在外层 settings/build_config.json，
     # 回退后要逐字节还原成安装前的版本。防的是安装流程在内层又生成一份
-    # source/build_config.json，让监控器和 CLI 各读各的。
+    # source/settings/build_config.json，让监控器和 CLI 各读各的。
     # 夹具伪造结果目录（selection.json + 新旧二进制 + 源码哈希），
     # patch 掉 autotune.ROOT / 机器指纹 / 清单写入，避免动真实目录。
     def test_offline_install_and_rollback_keep_outer_build_config(self):
@@ -38,8 +38,8 @@ class ConfigLocationTests(unittest.TestCase):
             (source/'pbb').mkdir();(source/'pbb'/'__init__.py').write_text('')
             (outer/'PBBMonitor').mkdir();run=source/'trial';run.mkdir()
             (source/'engine_main.cpp').write_text('unchanged')
-            build_settings.write(outer/'config/build_config.json',build_settings.fresh())
-            previous=(outer/'config/build_config.json').read_bytes()
+            build_settings.write(outer/'settings/build_config.json',build_settings.fresh())
+            previous=(outer/'settings/build_config.json').read_bytes()
             selected={}
             for name,file in [('standard','pbb_engine.exe'),('ui','pbb_ui_engine.exe')]:
                 target=source/'build'/file;target.write_bytes(b'old')
@@ -52,31 +52,39 @@ class ConfigLocationTests(unittest.TestCase):
             with patch.object(autotune,'ROOT',source),patch.object(build,'_machine_identity',return_value=['test']), \
                  patch.object(build,'_record_binary',side_effect=record),patch.dict('os.environ',{'PBB_SRC_DIR':''}):
                 autotune.install(run)
-                self.assertTrue(json.loads((outer/'config/build_config.json').read_text())['tested'])
+                self.assertTrue(json.loads((outer/'settings/build_config.json').read_text())['tested'])
                 self.assertFalse((source/'build_config.json').exists())
                 autotune.install(run,rollback=True)
-            self.assertEqual((outer/'config/build_config.json').read_bytes(),previous)
+            self.assertEqual((outer/'settings/build_config.json').read_bytes(),previous)
             self.assertEqual((source/'build/pbb_ui_engine.exe').read_bytes(),b'old')
 
-    # 打包时 stage_configs 把可编辑配置集中到外层 config/，并清掉根、source/、
-    # PBBMonitor/_internal/ 下的同名副本；发布的 build_config.json 必须未测试。
+    # 打包时 stage_configs 把测号配置集中到外层 config/、应用设置集中到外层 settings/，
+    # 并清掉根、source/、PBBMonitor/_internal/ 以及彼此目录里的同名副本；
+    # 发布的 build_config.json 必须未测试，旧位置 config/build_config.json 不能残留。
     # 这是 REPO.md §7.2/§7.3 两个缺陷的回归：漏写 build_config.json，或清理时把
     # 内层 source/ 分支删掉，都会在这里暴露。
     def test_package_configs_only_at_outer_level(self):
         with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory:
             root=Path(directory)
-            # 先在各层铺满旧配置，模拟历史残留。source/ 里要有 pbb 包，
-            # 才算"发布布局的源码目录"（package_root 的上浮判据）。
+            # 先在各层铺满旧配置，模拟历史残留（含旧位置的 config/build_config.json）。
+            # source/ 里要有 pbb 包，才算"发布布局的源码目录"（package_root 的上浮判据）。
             (root/'source'/'pbb').mkdir(parents=True)
             (root/'source'/'pbb'/'__init__.py').write_text('')
-            for folder in ('source','PBBMonitor/_internal'):
+            for folder in ('source','PBBMonitor/_internal','config'):
                 (root/folder).mkdir(parents=True, exist_ok=True)
-                for name in package_release.CONFIG_NAMES:(root/folder/name).write_text('old')
+                for name in package_release.CONFIG_NAMES | package_release.SETTINGS_NAMES:
+                    (root/folder/name).write_text('old')
             package_release.stage_configs(root)
             self.assertTrue((root/'config/config.yaml').is_file())
-            self.assertFalse(json.loads((root/'config/build_config.json').read_text())['tested'])
-            for folder in ('source','PBBMonitor/_internal'):
-                self.assertFalse(any((root/folder/name).exists() for name in package_release.CONFIG_NAMES))
+            self.assertFalse(json.loads((root/'settings/build_config.json').read_text())['tested'])
+            # 测号配置与应用设置各就各位，不能再混放
+            self.assertFalse((root/'config/build_config.json').exists())
+            self.assertFalse((root/'settings/config.yaml').exists())
+            for folder in ('source','PBBMonitor/_internal','config','settings',''):
+                where = root / folder if folder else root
+                leftovers = [name for name in package_release.CONFIG_NAMES | package_release.SETTINGS_NAMES
+                             if (where / name).is_file() and (where / name).read_bytes() == b'old']
+                self.assertEqual(leftovers, [], f'{folder or "包根"} 里残留了旧配置: {leftovers}')
             self.assertEqual(build_settings.config_root(root/'source'),root/'config')
             self.assertEqual(build_settings.config_root(root/'PBBMonitor/_internal'),root/'config')
 

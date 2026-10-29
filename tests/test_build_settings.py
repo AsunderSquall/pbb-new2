@@ -33,7 +33,7 @@ class BuildConfigTests(unittest.TestCase):
         profile=dict(settings.fresh(),tested=True,status='complete',machine=['host'],compiler='g++',
             source_hashes={'engine_main.cpp':hashlib.sha256(b'source').hexdigest()},
             options=dict(settings.DEFAULTS,attr=False,filter=2,unroll=False))
-        settings.write(root/'build_config.json',profile)
+        settings.write(root/'settings/build_config.json',profile)
         return profile
 
     # fresh() 是发布包模板与回退基准：必须 tested=False、status='none'、options 为默认值。
@@ -85,7 +85,7 @@ class BuildConfigTests(unittest.TestCase):
             with patch.object(build,'BASE_DIR',str(root)):
                 build._record_binary(str(binary),'g++',[],engine_target='ui')
                 self.assertTrue(build._binary_is_current(str(binary),engine_target='ui'))
-                profile['options']['attr']=True;settings.write(root/'build_config.json',profile)
+                profile['options']['attr']=True;settings.write(root/'settings/build_config.json',profile)
                 self.assertFalse(build._binary_is_current(str(binary),engine_target='ui'))
 
     # portable 构建完全不采用本机选择（签名为 None），保证发布引擎与本机测速结论无关。
@@ -95,14 +95,14 @@ class BuildConfigTests(unittest.TestCase):
             with patch.object(build,'BASE_DIR',str(root)),patch.dict(os.environ,{'PBB_BUILD_MODE':'portable'}):
                 self.assertIsNone(build._build_config_signature('g++'))
 
-    # 发布 payload 必须无条件把 build_config.json 换成 fresh()：即便本机这份是
-    # tested=true 的结论，也不能随包发出去（对应 REPO.md §4.2 的回归）。
+    # 发布 payload 必须无条件用 fresh()：即便本机这份是 tested=true 的结论，也不能随包
+    # 发出去（对应 REPO.md §4.2 的回归）。构建选择属于应用设置，走 distribution_settings()。
     def test_packaged_config_is_always_fresh(self):
         with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory:
             root=Path(directory);self.fixture(root)
-            shipped=json.loads(package_release.source_payload(root/'build_config.json'))
+            shipped=json.loads(package_release.distribution_settings()['build_config.json'])
             self.assertEqual(shipped,settings.fresh())
-            self.assertTrue(json.loads((root/'build_config.json').read_text())['tested'])
+            self.assertTrue(json.loads((root/'settings/build_config.json').read_text())['tested'])
 
     # 候选量公式必须和 AUTOTUNE.md 一致：T/day × 10^12 ÷ 86400 × 秒数，向下取整到
     # 一百万的整数倍、下限一百万。取整若变成四舍五入或去掉了对齐，任务量就会漂移。
@@ -127,7 +127,7 @@ class BuildConfigTests(unittest.TestCase):
         self.assertEqual(tuner.compile_seconds,5)
 
     # 发布布局里源码在 source/（内含 pbb 包）、冻结监控器在 PBBMonitor/_internal/，
-    # 二者必须解析到同一份外层 config/build_config.json（settings.config_path）。
+    # 二者必须解析到同一份外层 settings/build_config.json（settings.config_path）。
     # 防的是内层再冒出一份可编辑配置、两边各读各的（对应 REPO.md §7.2/§7.3）。
     # 判据是"这一级有没有 pbb 包"，所以夹具必须先造出 source/pbb/__init__.py。
     def test_frozen_offline_monitor_reads_shared_source_config(self):
@@ -135,11 +135,27 @@ class BuildConfigTests(unittest.TestCase):
             root=Path(directory);source=root/'source';(source/'pbb').mkdir(parents=True)
             (source/'pbb'/'__init__.py').write_text('')
             (root/'PBBMonitor').mkdir()
-            settings.write(root/'config/build_config.json',settings.fresh())
-            self.assertEqual(settings.config_path(root/'PBBMonitor/_internal'),root/'config/build_config.json')
-            self.assertEqual(settings.config_path(source),root/'config/build_config.json')
-            # 开发仓库形态：数据根本身就是包根，config/ 就在它下面。
-            self.assertEqual(settings.config_path(root),root/'config/build_config.json')
+            settings.write(root/'settings/build_config.json',settings.fresh())
+            self.assertEqual(settings.config_path(root/'PBBMonitor/_internal'),root/'settings/build_config.json')
+            self.assertEqual(settings.config_path(source),root/'settings/build_config.json')
+            # 开发仓库形态：数据根本身就是包根，settings/ 就在它下面。
+            self.assertEqual(settings.config_path(root),root/'settings/build_config.json')
+
+    # 迁移期兼容：旧包把 build_config.json 放在 config/ 下。settings/ 里没有时仍然读得到，
+    # 但不能反过来把新位置写回旧目录（否则两个目录又会各有一份）。
+    def test_legacy_config_location_is_still_readable(self):
+        with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory:
+            root=Path(directory);(root/'engine_main.cpp').write_bytes(b'source')
+            profile=dict(settings.fresh(),tested=True,status='complete',machine=['host'],compiler='g++',
+                source_hashes={'engine_main.cpp':hashlib.sha256(b'source').hexdigest()})
+            settings.write(root/'config/build_config.json',profile)
+            value,active=settings.load(root,['host'],'g++')
+            self.assertTrue(active)
+            self.assertEqual(value,profile)
+            settings.write(settings.config_path(root),dict(profile,tested=False))
+            value,active=settings.load(root,['host'],'g++')
+            self.assertFalse(active)          # 新位置优先：即便旧位置仍是 tested=true
+            self.assertFalse(value['tested'])
 
     # 期望时长只是软目标：预算用尽后任务仍要跑完并返回正常结果，因此不能给
     # subprocess.run 传 timeout 把任务强杀（那会留下半截任务/假失败）。
