@@ -387,6 +387,22 @@ def scaled_geometry(logical_width: int, logical_height: int,
     return f"{max(width, 640)}x{max(height, 480)}"
 
 
+def _default_window_height(logical_height: int = 820) -> int:
+    """主窗口/编辑器的默认**逻辑**高度：设计值 820，小屏按可用高度收窄。
+
+    1366x768、100% 缩放时物理可用高度约 728（扣掉标题栏与任务栏）；``scaled_geometry``
+    只夹到屏幕的 92%，剩下的部分仍可能让 Tk 把窗口底边压到屏幕外/任务栏下。这里先把
+    可用的**逻辑**高度算出来，让窗口整体落在屏幕内（侧栏另有滚动区兜底）。
+    """
+    try:
+        screen_h = _dpi_probe_root().winfo_screenheight()
+        scale = max(1.0, windows_dpi_scale())
+        available = int((screen_h * 0.92 - 60) / scale)
+    except Exception:
+        available = logical_height
+    return max(560, min(logical_height, available))
+
+
 def _scaled_min_size(logical_width: int, logical_height: int) -> tuple[int, int]:
     """把逻辑像素的最小尺寸换算成物理像素，供 ``minsize()`` 使用。
 
@@ -1024,8 +1040,10 @@ class Monitor(tk.Tk):
         self.after_idle(lambda: apply_windows_window_icon(self))
         # 尺寸按"96 DPI 下的逻辑像素"书写，由 scaled_geometry 换算到当前 DPI 的物理像素。
         # 直接写死物理像素在 150% 缩放下会显得很小（1100 物理像素只相当于 733 逻辑像素）。
-        self.geometry(scaled_geometry(1100, 820))
-        self.minsize(*_scaled_min_size(880, 640))
+        # 高度还要按屏幕夹一下：1366x768 / 100% 时 Tk 会把 820 高的窗口底边推到屏幕外，
+        # 连标题栏都可能看不到（实测反馈）。夹到"屏幕高度 - 留白"后窗口整体可见。
+        self.geometry(scaled_geometry(1100, _default_window_height()))
+        self.minsize(*_scaled_min_size(880, 560))
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.proc: subprocess.Popen | None = None
         self.engine_bin: str | None = None
@@ -1140,8 +1158,54 @@ class Monitor(tk.Tk):
         ttk.Button(theme_bar, text="亮色", command=lambda: self._set_theme(False)).pack(side="right")
         ttk.Button(theme_bar, text="暗色", command=lambda: self._set_theme(True)).pack(side="right", padx=(0, 6))
 
-        controls = ttk.Frame(sidebar, padding=(22, 18, 22, 10))
-        controls.pack(fill="x")
+        # ── 底部启动区：固定在侧栏底部，任何窗口高度下都看得见 ──
+        # 1366x768 / 100% 缩放时，窗口可用高度只有 ~700 逻辑像素；旧布局把「开始」按钮
+        # 放在侧栏最底部、侧栏又不可滚动，按钮直接被挤出屏幕（截图反馈）。现在启动区
+        # 用 side="bottom" 先占位，中段控件放进可滚动区域。
+        launch_bar = ttk.Frame(sidebar, style="Header.TFrame", padding=(22, 8, 22, 12))
+        launch_bar.pack(side="bottom", fill="x")
+        launch_options = ttk.Frame(launch_bar, style="Header.TFrame")
+        launch_options.pack(fill="x")
+        launch_options.columnconfigure(0, weight=1)
+        launch_options.columnconfigure(1, weight=1)
+        # 三个复选框不再挤在一行：挤在一起时「自动更新 start」会被侧栏右边缘截断。
+        self.resume_checkbutton = self._checkbutton(launch_options, "读入文件并续测", self.resume_var)
+        self.resume_checkbutton.grid(row=0, column=0, sticky="w")
+        self.rebuild_checkbutton = self._checkbutton(launch_options, "Rebuild 引擎", self.rebuild_var)
+        self.rebuild_checkbutton.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        # 结束时把配置里的 start 往前推（默认勾选）—— 这样下次不需要续测也能接着算。
+        self.auto_start_checkbutton = self._checkbutton(
+            launch_options, "自动更新 start", self.auto_start_var)
+        self.auto_start_checkbutton.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        launch_buttons = ttk.Frame(launch_bar, style="Header.TFrame")
+        launch_buttons.pack(fill="x", pady=(8, 0))
+        self.start_button = ttk.Button(launch_buttons, text="开始", command=self._start)
+        self.start_button.pack(side="left", fill="x", expand=True)
+        self.stop_button = ttk.Button(launch_buttons, text="停止", command=self._stop, state="disabled")
+        self.stop_button.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ttk.Button(launch_buttons, text="编辑配置", command=self._open_editor).pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+
+        # ── 中段：配置/线程/预计总量/结果文件，装不下时可滚动 ──
+        scroll_host = ttk.Frame(sidebar)
+        scroll_host.pack(side="top", fill="both", expand=True)
+        sidebar_canvas = tk.Canvas(scroll_host, highlightthickness=0, borderwidth=0,
+                                   bg=self.colors["bg"])
+        sidebar_scrollbar = ttk.Scrollbar(scroll_host, orient="vertical", command=sidebar_canvas.yview)
+        sidebar_canvas.configure(yscrollcommand=sidebar_scrollbar.set)
+        sidebar_canvas.pack(side="left", fill="both", expand=True)
+        sidebar_scrollbar.pack(side="right", fill="y")
+        controls = ttk.Frame(sidebar_canvas, padding=(22, 6, 22, 10))
+        controls_window = sidebar_canvas.create_window((0, 0), window=controls, anchor="nw")
+        controls.bind("<Configure>", lambda _event: (
+            sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all")),
+            self._sync_scrollbar(sidebar_canvas)))
+        sidebar_canvas.bind("<Configure>",
+                            lambda event: sidebar_canvas.itemconfigure(controls_window, width=event.width))
+        self._scrollbars[str(sidebar_canvas)] = sidebar_scrollbar
+        self._setup_scrollbar(sidebar_canvas, sidebar_scrollbar)
+        self._bind_wheel(sidebar_canvas, controls)
+        self.sidebar_canvas = sidebar_canvas
         ttk.Label(controls, text="配置文件").grid(row=0, column=0, sticky="w")
         # 输入框里只放**文件名**（不含目录），目录固定为 config/（见 build_settings.config_root）。
         # 点右侧「选择」会打开配置选择器（表格列出 config/ 下的全部配置）。
@@ -1175,25 +1239,6 @@ class Monitor(tk.Tk):
         ttk.Entry(controls, textvariable=self.range_var).grid(row=8, column=0, columnspan=2, sticky="ew")
         ttk.Label(controls, text="结果文件").grid(row=9, column=0, sticky="w", pady=(10, 2))
         self._build_main_result_file(controls)
-        launch_options = ttk.Frame(controls)
-        launch_options.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        launch_options.columnconfigure(0, weight=1)
-        launch_options.columnconfigure(1, weight=1)
-        # 三个复选框不再挤在一行：挤在一起时「自动更新 start」会被侧栏右边缘截断。
-        # 前两个同在红色标题行，第三个单独一行、左对齐（与上面两行文字同一起点）。
-        self.resume_checkbutton = self._checkbutton(launch_options, "读入文件并续测", self.resume_var)
-        self.resume_checkbutton.grid(row=0, column=0, sticky="w")
-        self.rebuild_checkbutton = self._checkbutton(launch_options, "Rebuild 引擎", self.rebuild_var)
-        self.rebuild_checkbutton.grid(row=0, column=1, sticky="w", padx=(12, 0))
-        # 结束时把配置里的 start 往前推（默认勾选）—— 这样下次不需要续测也能接着算。
-        self.auto_start_checkbutton = self._checkbutton(
-            launch_options, "自动更新 start", self.auto_start_var)
-        self.auto_start_checkbutton.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.start_button = ttk.Button(controls, text="开始", command=self._start)
-        self.start_button.grid(row=12, column=0, sticky="ew", pady=(10, 0))
-        self.stop_button = ttk.Button(controls, text="停止", command=self._stop, state="disabled")
-        self.stop_button.grid(row=12, column=1, sticky="ew", padx=(6, 0), pady=(10, 0))
-        ttk.Button(controls, text="编辑配置", command=self._open_editor).grid(row=13, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         controls.columnconfigure(0, weight=1)
 
         # 提示文字：wraplength 是像素，写死会带来两个问题 ——
@@ -1289,6 +1334,10 @@ class Monitor(tk.Tk):
             if window is not None and window.winfo_exists():
                 window.configure(bg=colors["bg"])
         self.score_canvas.configure(bg=colors["bg"])
+        # 侧栏中段的滚动区也用同一底色，否则切换主题后那块会留着旧主题的颜色。
+        sidebar_canvas = getattr(self, "sidebar_canvas", None)
+        if sidebar_canvas is not None and sidebar_canvas.winfo_exists():
+            sidebar_canvas.configure(bg=colors["bg"])
         for canvas in getattr(self, "_editor_canvases", []):
             if canvas.winfo_exists():
                 canvas.configure(bg=colors["panel"])
@@ -1609,6 +1658,33 @@ class Monitor(tk.Tk):
         # 这里先绑一次，覆盖"打开编辑器时还没有任何行"的情况。
         self._bind_wheel(canvas, rows)
         return section, rows, viewport
+
+    def _scrollable_page(self, notebook, title: str, padding: int = 18):
+        """给 notebook 加一页并按纵向滚动承载内容，返回可往里放控件的容器。
+
+        小屏（1366x768、100% 缩放）上编辑器 notebook 的可视高度只有 ~510，而「评分」
+        页要 515、「多字符集格式」页要 587 —— 不滚动就会把底部的按钮/字段裁掉。
+        自动滚动条由 ``_setup_scrollbar`` 控制（内容装得下时自动隐藏）。
+        """
+        host = ttk.Frame(notebook)
+        notebook.add(host, text=title)
+        canvas = tk.Canvas(host, highlightthickness=0, borderwidth=0, bg=self.colors["panel"])
+        scrollbar = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        inner = ttk.Frame(canvas, padding=padding)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _event: (
+            canvas.configure(scrollregion=canvas.bbox("all")), self._sync_scrollbar(canvas)))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self._scrollbars[str(canvas)] = scrollbar
+        self._setup_scrollbar(canvas, scrollbar)
+        self._bind_wheel(canvas, inner)
+        self._editor_canvases.append(canvas)
+        # 登记 rows→canvas 映射：切页后 Tk 才会真正布局，届时需要重算滚动条。
+        self._scroll_canvases[str(inner)] = canvas
+        return inner
 
     def _wrap_label(self, label, margin: int = 8):
         """让一个多行 Label 的换行宽度跟随父容器实际宽度（而不是写死 wraplength）。
@@ -2049,8 +2125,9 @@ class Monitor(tk.Tk):
         if self._icon_image is not None:
             editor.iconphoto(True, self._icon_image)
         editor.after_idle(lambda: apply_windows_window_icon(editor))
-        editor.geometry(scaled_geometry(980, 820))
-        editor.minsize(*_scaled_min_size(820, 660))
+        # 与主窗口同样按屏幕高度夹一下：1366x768 下 820 逻辑像素会被推到屏幕外。
+        editor.geometry(scaled_geometry(980, _default_window_height()))
+        editor.minsize(*_scaled_min_size(820, 560))
         editor.configure(bg=self.colors["bg"])
         editor.transient(self)
         editor.protocol("WM_DELETE_WINDOW", self._close_editor)
@@ -2067,12 +2144,8 @@ class Monitor(tk.Tk):
         ttk.Label(actions, text="文件名").pack(side="left", padx=(0, 6))
         ttk.Entry(actions, textvariable=self.editor_name_var, width=24).pack(side="left")
         ttk.Button(actions, text="保存", command=self._save_editor).pack(side="left", padx=(8, 0))
-        # 「使用默认配置」= 把界面设置里记录的默认评分阈值填回本页（不动字符集/前缀）；
-        # 「设为默认配置」= 把当前文件名与评分阈值写进界面设置，成为以后新配置的默认值。
-        ttk.Button(actions, text="使用默认配置",
-                   command=self._use_default_config).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="设为默认配置",
-                   command=self._save_as_default_config).pack(side="left", padx=(6, 0))
+        # 「使用默认评分 / 设为默认评分」放在「评分」页里（见下面的 scores 页），
+        # 因为它们只作用于评分阈值；放在窗口顶部容易被误当成"整份配置"的操作。
         recommendation = ttk.Frame(editor, padding=(22, 0, 22, 10))
         recommendation.pack(fill="x")
         self._wrap_label(ttk.Label(
@@ -2080,14 +2153,13 @@ class Monitor(tk.Tk):
             style="LaunchNotice.TLabel", justify="left")).pack(anchor="w", fill="x")
         notebook = ttk.Notebook(editor)
         notebook.pack(fill="both", expand=True, padx=22, pady=(0, 12))
-        basic = ttk.Frame(notebook, padding=18)
-        affixes = ttk.Frame(notebook, padding=18)
-        scores = ttk.Frame(notebook, padding=18)
-        output = ttk.Frame(notebook, padding=18)
-        notebook.add(basic, text="基础")
-        notebook.add(affixes, text="前后缀")
-        notebook.add(scores, text="评分")
-        notebook.add(output, text="输出")
+        # 每一页都套一层纵向滚动：1366x768 下 notebook 只有 ~510 高，而「评分」页需要
+        # 515、「多字符集格式」页需要 587，不滚动就会把底部的按钮/字段裁掉（和主窗口
+        # 启动键被挤出屏幕是同一类问题）。
+        basic = self._scrollable_page(notebook, "基础")
+        affixes = self._scrollable_page(notebook, "前后缀")
+        scores = self._scrollable_page(notebook, "评分")
+        output = self._scrollable_page(notebook, "输出")
         # 切页后要重算滚动条：Tk 不会映射非当前页里的控件（winfo_height() 为 1），
         # 仅靠 <Configure> 不足以保证切回来时状态正确。
         notebook.bind("<<NotebookTabChanged>>", self._sync_all_scrollbars)
@@ -2192,8 +2264,7 @@ class Monitor(tk.Tk):
         basic.columnconfigure(1, weight=1)
 
         # 格式配置和旧字符集编辑独立；保存时只有启用的方式生效。
-        flex_page = ttk.Frame(notebook, padding=18)
-        notebook.add(flex_page, text="多字符集格式")
+        flex_page = self._scrollable_page(notebook, "多字符集格式")
         self.flex_enabled_var = tk.BooleanVar(value='format' in cfg)
         self._checkbutton(flex_page, "启用具名字符集与格式列表", self.flex_enabled_var).grid(row=0, column=0, columnspan=2, sticky='w')
         ttk.Label(flex_page, text='格式字符串为固定内容；{"charset": "族名"} 表示一个可变位置。\n各族沿用基础页的字符集字段；族内每个枚举单元须等宽。', justify='left').grid(row=1, column=0, columnspan=2, sticky='w', pady=8)
@@ -2319,6 +2390,18 @@ class Monitor(tk.Tk):
             field(scores, 8 + index // 2, f"PTT {family.upper()}", f"collection.ptt_{family}", collection.get(f"ptt_{family}", 0), index % 2, 14)
         scores.columnconfigure(1, weight=1)
         scores.columnconfigure(3, weight=1)
+        # 默认评分阈值：只作用于本页（collection），所以按钮就放在本页底部。
+        default_actions = ttk.Frame(scores)
+        default_actions.grid(row=11, column=0, columnspan=4, sticky="w", pady=(16, 0))
+        ttk.Button(default_actions, text="使用默认评分",
+                   command=self._use_default_scores).pack(side="left")
+        ttk.Button(default_actions, text="设为默认评分",
+                   command=self._save_as_default_scores).pack(side="left", padx=(8, 0))
+        ttk.Label(scores, text="默认评分来自 settings/ui_settings.json 的 collection 段；"
+                               "「使用默认评分」只覆盖本页阈值（点保存才生效），"
+                               "「设为默认评分」把本页阈值记为默认值。",
+                  font=(UI_FONT, 9), justify="left", wraplength=pixels(680)
+                  ).grid(row=12, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         out = cfg.get("output", {})
         self._build_result_file_row(output, str(out.get("result_file", "+")))
@@ -2561,27 +2644,18 @@ class Monitor(tk.Tk):
                     normalized.append(family)
         return ",".join(family for family in FAMILIES if family in normalized)
 
-    def _editor_default_name(self) -> str:
-        """编辑器当前应该被保存成的文件名（与 _save_editor 的取名规则一致，只算不写）。"""
-        raw = self.editor_name_var.get().strip() or os.path.basename(self.config_var.get().strip())
-        raw = os.path.basename(raw.replace("\\", "/"))
-        if raw and not os.path.splitext(raw)[1]:
-            raw += ".yaml"
-        return raw
-
-    def _use_default_config(self):
-        """「使用默认配置」：把界面设置里的默认评分阈值填回编辑页。
+    def _use_default_scores(self):
+        """「使用默认评分」：把界面设置里的默认评分阈值填回「评分」页。
 
         只覆盖**评分阈值**（`collection`），字符集/前缀/枚举范围这些"这份配置自己的
-        东西"保持不动 —— 否则会把用户正在编辑的内容整片冲掉，而默认值本身并不包含
-        这些信息。填完仍需点「保存」才落盘。
+        东西"保持不动。填完仍需点「保存」才落盘。
         """
         defaults = load_ui_settings().get("collection")
         if not isinstance(defaults, dict) or not defaults:
             messagebox.showinfo(
-                "没有默认配置",
+                "没有默认评分",
                 f"settings/{UI_SETTINGS_NAME} 里没有记录默认评分阈值。\n"
-                "先在编辑器里设好阈值，再点「设为默认配置」。",
+                "先在「评分」页设好阈值，再点「设为默认评分」。",
                 parent=self.editor)
             return
         applied = []
@@ -2590,46 +2664,34 @@ class Monitor(tk.Tk):
             if var is not None:
                 var.set(str(value))
                 applied.append(key)
-        self.status_var.set(f"已把默认评分阈值填回编辑页（{len(applied)} 项）；点「保存」后生效")
+        self.status_var.set(f"已把默认评分填回「评分」页（{len(applied)} 项）；点「保存」后生效")
 
-    def _save_as_default_config(self):
-        """「设为默认配置」：把当前文件名与评分阈值写进界面设置。
+    def _save_as_default_scores(self):
+        """「设为默认评分」：把「评分」页的阈值记为默认值。
 
-        写入 `settings/ui_settings.json` 的两项：
-          * ``default_config`` —— 打开界面时默认加载哪个配置文件（选择器里的「设为
-            启动默认」写的是同一项）；
-          * ``collection``      —— 新配置的默认评分阈值（「编辑新配置」读它）。
+        只写 `settings/ui_settings.json` 的 ``collection``（新配置的默认评分阈值）；
+        「打开界面默认加载哪个文件」由选择器的「设为启动默认」负责，两者互不影响。
         """
         try:
             cfg = self._editor_config()
             _validate_config(cfg)
         except Exception as exc:
-            messagebox.showerror("无法设为默认配置", str(exc), parent=self.editor)
-            return
-        name = self._editor_default_name()
-        if not name:
-            messagebox.showerror("无法设为默认配置", "请先填写配置文件名。", parent=self.editor)
+            messagebox.showerror("无法设为默认评分", str(exc), parent=self.editor)
             return
         if not messagebox.askyesno(
-                "设为默认配置",
-                f"把「{name}」设为默认配置？\n\n"
-                "· 打开界面时默认加载它（文件需存在于 config/）；\n"
-                "· 当前编辑页的评分阈值会成为新配置的默认值。",
+                "设为默认评分",
+                "把当前「评分」页的阈值记为默认值？\n\n"
+                "以后「编辑新配置」会用这套阈值，「使用默认评分」也读它。",
                 parent=self.editor):
             return
         settings = load_ui_settings()
-        settings["default_config"] = name
         settings["collection"] = dict(cfg.get("collection") or {})
         try:
             save_ui_settings(settings)
         except OSError as exc:
             messagebox.showerror("无法保存界面设置", str(exc), parent=self.editor)
             return
-        # 选择器表格里的「默认」标记要立刻更新（它可能正开着）。
-        selector = getattr(self, "_config_selector", None)
-        if selector is not None and selector.winfo_exists():
-            selector.refresh()
-        self.status_var.set(f"默认配置：{name}（评分阈值也已记为默认）")
+        self.status_var.set("已记为默认评分（新配置与「使用默认评分」都读它）")
 
     def _save_editor(self, start=False, name: str | None = None):
         """保存编辑器内容到 **一个** 目标文件。

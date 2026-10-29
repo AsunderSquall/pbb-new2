@@ -175,7 +175,7 @@ class DefaultThresholdsTests(unittest.TestCase):
 
 
 class EditorDefaultButtonsTests(unittest.TestCase):
-    """配置编辑页的「使用默认配置」/「设为默认配置」。"""
+    """配置编辑页「评分」页上的「使用默认评分」/「设为默认评分」。"""
 
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory(dir=str(ROOT / 'build'))
@@ -199,21 +199,40 @@ class EditorDefaultButtonsTests(unittest.TestCase):
             item.stop()
         self._temp.cleanup()
 
-    def test_use_default_config_fills_thresholds_only(self):
+    def test_use_default_scores_fills_thresholds_only(self):
         self.app.editor_vars['collection.min_qp'].set('1')
         self.app.editor_vars['team_name'].set('不该被默认值覆盖')
-        self.app._use_default_config()
+        self.app._use_default_scores()
         self.assertEqual(self.app.editor_vars['collection.min_qp'].get(), '5400')
         self.assertEqual(self.app.editor_vars['team_name'].get(), '不该被默认值覆盖')
 
-    def test_save_as_default_config_writes_name_and_collection(self):
+    def test_save_as_default_scores_writes_collection_only(self):
         self.app.editor_vars['collection.min_qp'].set('1234')
         with patch.object(ui.messagebox, 'askyesno', return_value=True) as ask:
-            self.app._save_as_default_config()
+            self.app._save_as_default_scores()
         ask.assert_called_once()
         saved = ui.load_ui_settings()
-        self.assertEqual(saved['default_config'], os.path.basename(self.app._editor_default_name()))
         self.assertEqual(saved['collection']['min_qp'], 1234)
+        # 「设为默认评分」不该改启动默认配置（那是选择器「设为启动默认」的职责）。
+        self.assertEqual(saved['default_config'], 'config_football.yaml')
+
+    def test_default_score_buttons_live_on_the_score_page(self):
+        """两个按钮必须在「评分」页里，且编辑器顶部不再有它们的旧版本。"""
+        import tkinter.ttk as ttk
+        notebook = [w for w in self.app.editor.winfo_children() if isinstance(w, ttk.Notebook)][0]
+        tabs = {notebook.tab(tab, 'text'): tab for tab in notebook.tabs()}
+
+        def texts(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() == 'TButton':
+                    yield str(child.cget('text'))
+                yield from texts(child)
+
+        score_page = notebook.nametowidget(tabs['评分'])
+        self.assertIn('使用默认评分', set(texts(score_page)))
+        self.assertIn('设为默认评分', set(texts(score_page)))
+        self.assertNotIn('使用默认配置', set(texts(self.app.editor)))
+        self.assertNotIn('设为默认配置', set(texts(self.app.editor)))
 
     def test_selector_marks_the_default_row(self):
         selector = ui.ConfigSelector(self.app)
@@ -226,6 +245,44 @@ class EditorDefaultButtonsTests(unittest.TestCase):
                                 if name != 'config_football.yaml'))
         finally:
             selector.destroy()
+
+
+class SmallScreenLayoutTests(unittest.TestCase):
+    """1366x768 / 100% 缩放下，主窗口底部的「开始」按钮必须在窗口内。"""
+
+    def _close(self, app):
+        """销毁前先取消挂起的 after 回调，否则 Tk 会打印 ("after" script) 错误。"""
+        for callback in app.tk.call('after', 'info'):
+            app.after_cancel(callback)
+        app.destroy()
+
+    def test_start_button_stays_visible_when_window_is_short(self):
+        app = ui.Monitor()
+        try:
+            for height in (700, 646, 560):
+                app.geometry(f"1100x{height}")
+                app.update()
+                app.update_idletasks()
+                button = app.start_button
+                bottom = button.winfo_rooty() - app.winfo_rooty() + button.winfo_height()
+                self.assertTrue(button.winfo_ismapped(), f'h={height}: 开始按钮没有显示')
+                self.assertLessEqual(bottom, app.winfo_height(),
+                                     f'h={height}: 开始按钮底部 {bottom} 超出窗口 {app.winfo_height()}')
+        finally:
+            self._close(app)
+
+    def test_sidebar_controls_scroll_instead_of_clipping(self):
+        app = ui.Monitor()
+        try:
+            app.geometry("1100x560")
+            app.update()
+            app.update_idletasks()
+            box = app.sidebar_canvas.bbox('all')
+            self.assertIsNotNone(box)
+            self.assertGreater(box[3] - box[1], app.sidebar_canvas.winfo_height(),
+                               '侧栏内容比视口高时应当可滚动')
+        finally:
+            self._close(app)
 
 
 class OutputDirectoryTests(unittest.TestCase):
