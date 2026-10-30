@@ -2660,10 +2660,22 @@ class Monitor(tk.Tk):
             return
         applied = []
         for key, value in defaults.items():
-            var = self.editor_vars.get(f"collection.{key}")
-            if var is not None:
+            config_key = f"collection.{key}"
+            var = self.editor_vars.get(config_key)
+            if var is None:
+                continue
+            options = self.editor_choice_maps.get(config_key)
+            if options is not None:
+                # 下拉框（评分模式/收集模式）里存的是**显示文案**，不能直接塞原值：
+                # 旧写法 var.set("all") 会让框里显示成 "all"，保存时又反查不到选项
+                # （_editor_config 用 editor_choice_maps[显示文案] 取回数值）。
+                label = next((name for name, code in options.items() if str(code) == str(value)), None)
+                if label is None:
+                    continue
+                var.set(label)
+            else:
                 var.set(str(value))
-                applied.append(key)
+            applied.append(key)
         self.status_var.set(f"已把默认评分填回「评分」页（{len(applied)} 项）；点「保存」后生效")
 
     def _save_as_default_scores(self):

@@ -184,7 +184,8 @@ class EditorDefaultButtonsTests(unittest.TestCase):
         for item in self._patches:
             item.start()
         ui.save_ui_settings({'default_config': 'config_football.yaml',
-                             'collection': {'min_qp': 5400, 'score_list': 'qp'}})
+                             'collection': {'min_qp': 5400, 'score_list': 'qp,qd',
+                                            'score_mode': 'all', 'collect_mode': 1}})
         self.app = ui.Monitor()
         self.app.withdraw()
         self.app._open_editor()
@@ -205,6 +206,17 @@ class EditorDefaultButtonsTests(unittest.TestCase):
         self.app._use_default_scores()
         self.assertEqual(self.app.editor_vars['collection.min_qp'].get(), '5400')
         self.assertEqual(self.app.editor_vars['team_name'].get(), '不该被默认值覆盖')
+
+    def test_use_default_scores_maps_dropdown_labels(self):
+        """评分模式/收集模式是下拉框：默认值要按显示文案填回，保存能取回原值。"""
+        self.app.editor_vars['collection.score_mode'].set('任一达标即停止后续评分')
+        self.app.editor_vars['collection.collect_mode'].set('不收集特殊号')
+        self.app._use_default_scores()
+        self.assertEqual(self.app.editor_vars['collection.score_mode'].get(), '全部评分后判断')
+        self.assertEqual(self.app.editor_vars['collection.collect_mode'].get(), '收集预设阈值特殊号')
+        collection = self.app._editor_config()['collection']
+        self.assertEqual(collection['score_mode'], 'all')
+        self.assertEqual(collection['collect_mode'], 1)
 
     def test_save_as_default_scores_writes_collection_only(self):
         self.app.editor_vars['collection.min_qp'].set('1234')
