@@ -12,7 +12,7 @@ if errorlevel 1 (
     exit /b 1
 )
 if not exist "%~dp0source\tools\rebuild_local.py" (
-    echo [rebuild] Missing source\tools\rebuild_local.py - is the package complete?
+    echo [rebuild] Missing tools\rebuild_local.py - is the package complete?
     pause
     exit /b 1
 )
