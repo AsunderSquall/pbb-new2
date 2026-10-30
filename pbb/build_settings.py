@@ -163,3 +163,71 @@ def distribution_config():
     path = paths.BUILD_DIR / "distribution_defaults" / "build_config.json"
     write(path, fresh())
     return str(path)
+
+
+# ── 界面设置（settings/ui_settings.json）：命令行也要用，所以放在这里而不是 ui.py ──
+
+def ui_settings_path(base=None):
+    """界面设置文件路径：``<settings>/ui_settings.json``（与 build_config.json 同目录）。"""
+    return settings_root(base) / "ui_settings.json"
+
+
+def load_ui_settings(base=None) -> dict:
+    """读取界面设置；文件缺失或损坏时返回空字典（不让默认配置逻辑把程序拖垮）。"""
+    try:
+        value = json.loads(ui_settings_path(base).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _looks_like_search_config(cfg) -> bool:
+    """结构判断：是不是一份测号配置（而不是编译清单之类的同后缀文件）。
+
+    与界面的 ``ConfigSelector.is_search_config`` 同一判据 —— 测号配置必然带
+    character_set/character_sets 与 enumeration/collection 这几个 section。
+    """
+    if not isinstance(cfg, dict):
+        return False
+    if 'character_sets' in cfg or 'format' in cfg:
+        return all(key in cfg for key in ('character_sets', 'enumeration', 'collection'))
+    return all(key in cfg for key in ('character_set', 'prefixes', 'suffixes', 'enumeration', 'collection'))
+
+
+def default_config_path(base=None):
+    """不带 ``-c`` 时的默认配置：界面设置里的启动默认 → config.yaml → config_football.yaml
+    → 配置目录里第一个像测号配置的文件（按文件名排序）。
+
+    **为什么命令行也要读界面设置**：``start_cli.bat`` 直接双击运行时以前写死
+    ``-c config\\config.yaml``，而随包只带 ``config_football.yaml``，于是报
+    「配置文件不存在」；现在命令行与界面共用同一个"启动默认"。
+    """
+    from .config_file import load_config
+
+    root = config_root(base)
+    wanted = str(load_ui_settings(base).get("default_config") or "").strip()
+    if wanted:
+        candidate = Path(wanted) if os.path.isabs(wanted) else Path(root) / wanted
+        if candidate.is_file():
+            try:
+                if _looks_like_search_config(load_config(candidate)):
+                    return candidate
+            except Exception:
+                pass
+    for name in ("config.yaml", "config_football.yaml", "config.json", "config.toml"):
+        candidate = Path(root) / name
+        if candidate.is_file():
+            return candidate
+    try:
+        for name in sorted(os.listdir(root)):
+            candidate = Path(root) / name
+            if (candidate.is_file()
+                    and candidate.suffix.lower() in (".yaml", ".yml", ".json", ".toml")):
+                try:
+                    if _looks_like_search_config(load_config(candidate)):
+                        return candidate
+                except Exception:
+                    continue
+    except OSError:
+        pass
+    return None

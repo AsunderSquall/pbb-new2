@@ -8,6 +8,7 @@ config 字典使用 engine 键名 (与 engine.hpp kv[...] 及 config_schema.CONF
 import os, sys, time, tempfile, subprocess, signal
 
 from . import paths
+from .autostart import processed_from_line
 from .config_schema import engine_default, ALL_ENGINE_KEYS
 from .threading_config import resolve_threads
 
@@ -270,8 +271,8 @@ def _build_params(config: dict, charset_hex: str, result_file: str = "result.txt
 
 
 def run(config: dict, engine_bin: str = None, out_dir: str = None,
-        result_file: str = "result.txt") -> dict:
-    """执行单个 task, 返回 {results, max_xp, max_xd, speed}.
+        result_file: str = "result.txt", on_progress=None) -> dict:
+    """执行单个 task, 返回 {results, max_xp, max_xd, speed, count_raw}.
 
     config 两种模式:
       模式 A: character_set -> 内部调 pbb_core 构建 charset
@@ -282,6 +283,9 @@ def run(config: dict, engine_bin: str = None, out_dir: str = None,
 
     out_dir:     输出目录. None=临时目录(用完删除), "."=当前目录保留.
     result_file: 引擎结果文件名 (相对 out/). 分布式多 task 并发同目录时传唯一名.
+    on_progress: 可选回调 ``on_progress(processed)``，引擎每输出一行进度就用"已处理
+                 候选数"调用一次（「自动更新 start」按 0.01T 阶梯写盘就挂在这里，
+                 不需要另开轮询线程）。
     """
     # 字符集
     if "charset_hex" in config:
@@ -351,6 +355,10 @@ def run(config: dict, engine_bin: str = None, out_dir: str = None,
                     k, _, v = tok.partition("=")
                     summary[k] = v
                 continue
+            if on_progress is not None:
+                done = processed_from_line(line)
+                if done is not None:
+                    on_progress(done)
             print(f"  {line}", file=sys.stderr, flush=True)
         proc.wait()
         elapsed = time.time() - t0
@@ -394,10 +402,12 @@ def run(config: dict, engine_bin: str = None, out_dir: str = None,
         found = int(summary.get("found", len(results)))
         speed = float(summary.get("speed", 0.0))
         return {"results": results, "max_xp": max_xp, "max_xd": max_xd,
-                "max_sum": max_sum, "found": found, "speed": speed}
+                "max_sum": max_sum, "found": found, "speed": speed,
+                "count_raw": int(summary.get("count", 0) or 0)}
 
     # 回退路径 (无摘要)
     rng = config["range_R"] - config["range_L"]
     speed = rng / elapsed if elapsed > 0 and rng > 0 else 0
     return {"results": results, "max_xp": mxp, "max_xd": mxd,
-            "max_sum": 0, "found": len(results), "speed": speed}
+            "max_sum": 0, "found": len(results), "speed": speed,
+            "count_raw": int(rng) if rng > 0 else 0}

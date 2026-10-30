@@ -239,8 +239,9 @@ def source_paths():
         "tests/test_ui_start.py",
         "tests/test_distribution_configs.py",
         "tests/test_progress_safety.py",
-        # 2026-10 批次新增：界面配置修复 + 顺序模式全局区间
+        # 2026-10 批次新增：界面配置修复 + 顺序模式全局区间 + 自动更新 start
         "tests/test_ui_config_fixes.py", "tests/test_sequential_global.py",
+        "tests/test_autostart.py",
         # 发布包内的自动测速入口与开发入口。
         "tune_quick.bat", "tune_full.bat", "run.bat", "run.sh", "run_ui.bat",
         # 配置模板（发布包 config/ 由 distribution_configs() 统一生成，这里只在源码目录留示例）。

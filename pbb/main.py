@@ -31,7 +31,7 @@ from .config_schema import (           # config→engine 映射唯一真相源
 
 # 仓库根（= 数据根）：config/ 的定位以它为基准。真实定义在 pbb/paths.py，
 # 这里保留 BASE_DIR 这个名字是为了让 config_root(BASE_DIR) 这类调用保持可读。
-from . import build_settings, paths
+from . import autostart, build_settings, paths
 
 BASE_DIR = str(paths.DATA_ROOT)
 
@@ -710,7 +710,9 @@ def main():
     # ── 1. 解析命令行 ──
     parser = argparse.ArgumentParser(description="PBB 名字评分测号器")
     parser.add_argument("-c", "--config", default=None,
-                        help="配置文件路径 (默认依次尝试 config.json/yaml/toml)")
+                        help="配置文件路径 (默认: 界面设置的启动默认 → config.yaml → config_football.yaml)")
+    parser.add_argument("--no-auto-start", action="store_true",
+                        help="关闭「自动更新 start」（默认开启：每测 0.01T 把已处理量写回配置的全局 start）")
     parser.add_argument("--rebuild", action="store_true", help="强制重编 C++ 引擎")
     parser.add_argument("--threads", type=int, help="覆盖: threads.worker_threads (-1=自动)")
     parser.add_argument("--team", help="覆盖: team_name")
@@ -749,15 +751,14 @@ def main():
         candidate = os.path.join(build_settings.config_root(BASE_DIR), config_path)
         if os.path.isfile(candidate):config_path = candidate
     if config_path is None:
-        for name in ("config.json", "config.yaml", "config.toml"):
-            candidate = os.path.join(build_settings.config_root(BASE_DIR), name)
-            if os.path.exists(candidate):
-                config_path = candidate
-                break
-        if config_path is None:
-            print("ERROR: 未找到配置文件 (尝试了 config.json/yaml/toml)", file=sys.stderr)
+        # 与界面同一口径：界面设置里的「启动默认」优先，其次 config.yaml /
+        # config_football.yaml / 配置目录里第一个像测号配置的文件。
+        default_path = build_settings.default_config_path(BASE_DIR)
+        if default_path is None:
+            print("ERROR: 未找到配置文件 (界面设置的启动默认 / config.yaml / config_football.yaml)", file=sys.stderr)
             print("  提示: 复制 config.example.* → config.* 并修改", file=sys.stderr)
             sys.exit(1)
+        config_path = str(default_path)
         print(f"[main] Auto config: {config_path}", file=sys.stderr)
     elif not os.path.exists(config_path):
         print(f"ERROR: 配置文件不存在: {config_path}", file=sys.stderr)
@@ -782,6 +783,8 @@ def main():
     # ── 3.6 断点续测 (--resume) ──
     resume_desc = None
     resume_temp_file = None
+    # 「自动更新 start」永远写**用户给的配置**，而不是续测用的临时文件（那个用完即删）。
+    write_config_path = config_path
     if args.resume:
         rf_raw = cfg.get("output", {}).get("result_file", "result.txt")
         rf = _resolve_result_file(rf_raw)
@@ -883,12 +886,26 @@ def main():
               f"Output: {paths.OUT_DIR / result_file}", file=sys.stderr)
 
     t0 = time.time()
+    # 「自动更新 start」默认开启：按 0.01T 阶梯把已处理量写回配置的全局 start，
+    # 中途断电/崩溃最多只损失 0.01T；--no-auto-start 可关闭（见 autostart）。
+    updater = autostart.StartUpdater(
+        write_config_path, cfg, enabled=not args.no_auto_start,
+        notify=lambda message: print(f"[auto-start] {message}", file=sys.stderr))
+    progress = {"done": 0}
+
+    def _on_progress(done):
+        progress["done"] = done
+        updater.on_processed(done)
+
     try:
-        result = run_engine(task_config, engine_bin, out_dir=out_dir, result_file=result_file)
+        result = run_engine(task_config, engine_bin, out_dir=out_dir, result_file=result_file,
+                            on_progress=_on_progress)
     except KeyboardInterrupt:
+        updater.finish(progress["done"])
         print("\n[main] Interrupted", file=sys.stderr)
         sys.exit(130)
     elapsed = time.time() - t0
+    updater.finish(result.get("count_raw") or progress["done"])
 
     # ── 6. 输出 ──
     count = len(result["results"])

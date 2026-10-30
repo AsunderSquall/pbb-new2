@@ -297,6 +297,33 @@ class SmallScreenLayoutTests(unittest.TestCase):
             self._close(app)
 
 
+class PeriodicStartAdvanceTests(unittest.TestCase):
+    """每测 0.01T 由引擎进度行触发一次 start 回写（不轮询、不开线程）。"""
+
+    def _close(self, app):
+        for callback in app.tk.call('after', 'info'):
+            app.after_cancel(callback)
+        app.destroy()
+
+    def test_crossing_each_step_writes_once(self):
+        app = ui.Monitor()
+        try:
+            app._start_advance_mark = ui.autostart.STEP
+            calls = []
+            app._advance_config_start = lambda final=True: calls.append(final)
+            # 引擎的进度行是 count:X.XXXXXXT；0.01T 对应 0.010000T。
+            app._handle_line("task1 finished,task_mex=0,count:0.005000T")
+            self.assertEqual(calls, [], "还没到 0.01T 不该写盘")
+            app._handle_line("task2 finished,task_mex=1,count:0.010000T")
+            self.assertEqual(calls, [False], "跨过 0.01T 应写一次（中途写盘，不标记完成）")
+            app._handle_line("task3 finished,task_mex=2,count:0.015000T")
+            self.assertEqual(calls, [False], "同一阶梯内不该重复写")
+            app._handle_line("task4 finished,task_mex=3,count:0.020000T")
+            self.assertEqual(calls, [False, False])
+        finally:
+            self._close(app)
+
+
 class OutputDirectoryTests(unittest.TestCase):
     """测号输出落在包根 out/，不再埋进 source/ 或 PBBMonitor/_internal/。"""
 

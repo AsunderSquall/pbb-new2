@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import build_settings, engine as engine_runner, paths
+from . import autostart, build_settings, config_file, engine as engine_runner, paths
 from ._build import _compile_engine, _binary_is_current, ensure_core
 from .main import _build_task_config, _resolve_result_file, _validate_config
 from .threading_config import available_threads, resolve_threads
@@ -175,65 +175,19 @@ def load_config(path: str) -> dict:
     """按扩展名读取 YAML / JSON / TOML 配置。
 
     相对路径一律相对 CONFIG_DIR（由 build_settings.config_root 推出，见文件头），
-    因此 UI 里选择的文件名可以只是一个裸文件名。TOML 用标准库 tomllib（Python 3.11+）。
+    因此 UI 里选择的文件名可以只是一个裸文件名。实现在 ``pbb/config_file.py``，
+    与命令行共用（那边不能 import 界面模块，否则会拉起 Tk）。
     """
-    if not os.path.isabs(path):
-        path = os.path.join(CONFIG_DIR, path)
-    suffix = os.path.splitext(path)[1].lower()
-    if suffix == ".toml":
-        with open(path, "rb") as fh:
-            import tomllib
-            cfg = tomllib.load(fh)
-        from .flex import resolve_files
-        return resolve_files(cfg, path)
-    with open(path, "r", encoding="utf-8") as fh:
-        if suffix in (".yaml", ".yml"):
-            import yaml
-            cfg = yaml.safe_load(fh)
-        else:
-            cfg = json.load(fh)
-    from .flex import resolve_files
-    return resolve_files(cfg, path)
+    return config_file.load_config(path, CONFIG_DIR)
 
 
 def save_config(path, cfg):
     """保存配置到指定文件，保留该文件原有的格式（YAML / JSON / TOML）。
 
-    TOML 没有标准库写入器，这里手写最小序列化器：只支持配置里实际用到的
-    标量、列表与单层内联表；遇到其它类型直接抛 ValueError（编辑器会提示改用
-    "保存到 config.yaml"）。写盘前先 tomllib.loads 自校验一遍，并写入 .tmp 再替换，
-    保证校验失败时原文件不被破坏。
+    实现在 ``pbb/config_file.py``：TOML 用最小序列化器 + 自校验，三种格式都走
+    「写 .tmp 再原子替换」，测号中途写 start 时同样安全。
     """
-    target = Path(path)
-    suffix = target.suffix.lower()
-    if suffix in ('.yaml', '.yml'):
-        import yaml
-        text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
-    elif suffix == '.json':
-        text = json.dumps(cfg, ensure_ascii=False, indent=2)+'\n'
-    elif suffix == '.toml':
-        import tomllib
-        def value(item):
-            if isinstance(item, bool):return 'true' if item else 'false'
-            if isinstance(item, str):return json.dumps(item, ensure_ascii=False)
-            if isinstance(item, (int, float)):return repr(item)
-            if isinstance(item, list):return '['+', '.join(value(x) for x in item)+']'
-            if isinstance(item, dict):
-                return '{'+', '.join(json.dumps(k,ensure_ascii=False)+' = '+value(v) for k,v in item.items())+'}'
-            raise ValueError('TOML 无法保存此类型，请使用保存到 config.yaml。')
-        text = '\n'.join(json.dumps(k,ensure_ascii=False)+' = '+value(v) for k,v in cfg.items())+'\n'
-        tomllib.loads(text)  # Check serialization before replacing the current file.
-    else:
-        raise ValueError('请选择 .yaml、.yml、.json 或 .toml 配置文件。')
-    temporary = target.with_suffix(target.suffix+'.tmp')
-    try:
-        with temporary.open('w', encoding='utf8') as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-    finally:
-        if temporary.exists():temporary.unlink()
+    return config_file.save_config(path, cfg)
 
 
 # 界面自己的设置（与测号配置分开：它不是测号参数，也不该出现在配置选择器的表格里）。
@@ -3033,6 +2987,8 @@ class Monitor(tk.Tk):
             self._run_effective_start = int(
                 ((cfg.get("enumeration", {}).get("ranges") or [{}])[0]).get("start", 0) or 0)
             self._run_processed = 0
+            # 每测 0.01T 就把 start 往前推一次（见 autostart）：首个阈值从 0.01T 起算。
+            self._start_advance_mark = autostart.STEP
             self._run_start_updated = False
             task = _build_task_config(copy.deepcopy(cfg))
             task["n_threads"] = int(self.threads_var.get())
@@ -3298,6 +3254,11 @@ class Monitor(tk.Tk):
                 self._run_processed = int(round(float(match.group(1)) * 1e12))
             except (TypeError, ValueError):
                 pass
+            # 每跨过 0.01T 就落一次盘：完全由引擎这条进度行驱动，不轮询、不占线程。
+            if self._run_processed >= getattr(self, "_start_advance_mark", autostart.STEP):
+                self._start_advance_mark = (
+                    self._run_processed // autostart.STEP + 1) * autostart.STEP
+                self._advance_config_start(final=False)
         match = CURRENT_RE.search(line)
         if match:
             self.stat_vars["realtime"].set(f"{match.group(1)}T/d")

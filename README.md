@@ -115,7 +115,7 @@ src/
 
 ## 配置与编辑器
 
-支持 YAML、JSON、TOML。外层 `start_cli.bat` 显式指定 `config/config.yaml`。直接运行 `main.py` 不指定 `-c` 时，在配置目录依次查找 `config.json`、`config.yaml`、`config.toml`；UI 可选择配置文件。
+支持 YAML、JSON、TOML。外层 `start_cli.bat` 不带参数时使用「启动默认配置」；直接运行 `main.py` 不指定 `-c` 时，同样先看 `settings/ui_settings.json` 的 `default_config`，再依次尝试 `config.yaml`、`config_football.yaml`、配置目录里第一个测号配置；UI 可选择配置文件。
 
 编辑器只有一个**保存**按钮：目标由顶部的文件名输入框决定（改文件名即"另存为"，目录固定为 `config/`，缺扩展名补 `.yaml`）。保存成功会弹确认框，两个按钮「继续编辑」/「退出编辑」。各标签页（基础 / 前后缀 / 评分 / 输出 / 多字符集格式）都可纵向滚动，小屏上不用拉伸窗口。
 
@@ -217,7 +217,12 @@ python main.py -c config_football.yaml --range-end 1000000
 python ui.py
 ```
 
-`main.py --help` 显示完整参数。常用覆盖项包括 `--threads`、`--team`、`--mode`、`--vlen`、`--range-start`、`--range-end`、`--seed`、`--scl`、`--types`、`--custom-values`、`--output-xp`、`-o`、`--output-dest`、`--resume`、`--rebuild`。修改参数会改变任务，测速比较双方应使用相同设置。
+`main.py --help` 显示完整参数。常用覆盖项包括 `--threads`、`--team`、`--mode`、`--vlen`、`--range-start`、`--range-end`、`--seed`、`--scl`、`--types`、`--custom-values`、`--output-xp`、`-o`、`--output-dest`、`--resume`、`--rebuild`、`--no-auto-start`。修改参数会改变任务，测速比较双方应使用相同设置。
+
+命令行与界面共用同一套默认值：
+
+- **不带 `-c`** 时按「`settings/ui_settings.json` 里的启动默认 → `config.yaml` → `config_football.yaml` → `config/` 里第一个测号配置」选配置；外层的 `start_cli.bat` 直接双击也能跑（没有随包运行时就用 PATH 里的 `python`）。
+- **「自动更新 start」默认开启**：测号过程中每处理 0.01T（10^10 个候选）就把进度写回配置的全局 `start`，中途断电/崩溃最多损失 0.01T；写盘由引擎自己的进度行触发，不轮询、不占线程。`--no-auto-start` 可以关掉（关掉后跑完也不回写）。
 
 编译器和 SIMD 的实际选择以构建输出为准；自动探测到指令集支持不等于该路径已在本机测速证明更快。二进制旁的 `.build.json` 记录构建信息，源码 UI 与预编译监控器使用不同的二进制位置，替换其中一个不会自动替换另一个。
 
