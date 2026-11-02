@@ -625,6 +625,27 @@ def _read_cfg(cfg: dict, config_path: str) -> Any:
     return read_config(cfg, fd)
 
 
+def apply_range_overrides(cfg: dict, start=None, end=None) -> dict:
+    """把 ``--range-start`` / ``--range-end`` 写到配置的**全局** ``ranges[0]`` 上。
+
+    **为什么不能只改任务参数里的 range_L/range_R**：顺序模式（mode 1）下全局区间是
+    总控制器，``_build_task_config`` 会把它映射成每个前缀的绝对区间（``prefix_range_*``）；
+    映射发生在任务组装时，之后再改 ``range_L/range_R`` 引擎根本不看 —— 于是命令行
+    指定的窗口被静默忽略，整段 4.4T 全扫（实测一个"2M 候选"的窗口跑了十几分钟）。
+    随机模式仍然照旧用 ``range_L/range_R``，这里改全局区间对它们同样等价。
+    """
+    if start is None and end is None:
+        return cfg
+    ranges = cfg.setdefault('enumeration', {}).setdefault('ranges', [{}])
+    if not ranges:
+        ranges.append({})
+    if start is not None:
+        ranges[0]['start'] = int(start)
+    if end is not None:
+        ranges[0]['end'] = int(end)
+    return cfg
+
+
 def _build_task_config(cfg: dict) -> dict:
     """从配置 dict 构建 engine 层 task_config，统一使用 engine 键名.
 
@@ -812,6 +833,10 @@ def main():
             config_path = resume_temp_file
 
     # ── 4. 组装引擎配置 (CONFIG_MAP 驱动 + CLI 覆盖) ──
+    # 区间覆盖必须落在**全局 ranges** 上：顺序模式（mode 1）的 _build_task_config 会把
+    # 全局区间映射成各前缀的绝对区间，事后再改 range_L/R 不会生效（引擎只看
+    # prefix_range_*），表现为"窗口被忽略、整段重扫"。
+    apply_range_overrides(cfg, args.range_start, args.range_end)
     task_config = _build_task_config(cfg)
     if 'format' in task_config and any(value is not None for value in
                                       (args.vlen, args.scl, args.types, args.custom_values)):
@@ -831,8 +856,8 @@ def main():
     if args.team:           task_config["team_name"] = args.team
     if args.mode is not None:    task_config["mode"] = args.mode
     if args.vlen is not None:    task_config["variable_len"] = args.vlen
-    if args.range_start is not None: task_config["range_L"] = args.range_start
-    if args.range_end is not None:   task_config["range_R"] = args.range_end
+    # 区间已由 apply_range_overrides 写进全局 ranges（顺序模式的映射在那之前完成）；
+    # 这里不能再改 range_L/range_R，否则顺序模式两边不一致。
     for _mk in ("qp", "qd", "pp", "pd", "cqd", "cp", "fp", "wc", "fs", "pj"):
         _mv = getattr(args, f"min_{_mk}")
         if _mv is not None: task_config[f"min_{_mk}"] = _mv

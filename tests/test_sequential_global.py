@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tools'))
 
 from pbb import sequential, ui                      # noqa: E402
-from pbb.main import _build_task_config, _try_resume, _validate_config  # noqa: E402
+from pbb.main import (apply_range_overrides, _build_task_config,  # noqa: E402
+                      _try_resume, _validate_config)
 
 
 def sequential_config(**enumeration):
@@ -67,6 +68,17 @@ class GlobalRangeTests(unittest.TestCase):
                           (0, 500_000_000)])
         self.assertEqual(sequential.totals(cfg), [800_000_000, 600_000_000, 500_000_000])
         self.assertEqual(sequential.locate(cfg, 1_000_000_000), (1, 600_000_000))
+
+    def test_cli_range_overrides_are_applied_to_the_global_window(self):
+        """`--range-start/--range-end` 必须落到全局 ranges 上，否则顺序模式整段重扫。"""
+        cfg = apply_range_overrides(sequential_config(), 1_000_000_000, 1_000_002_000)
+        task = _build_task_config(copy.deepcopy(cfg))
+        left = task['prefix_range_L'].split(',')
+        right = task['prefix_range_R'].split(',')
+        total = sum(int(b) - int(a) for a, b in zip(left, right))
+        self.assertEqual(total, 2000, f'窗口应只有 2000 个候选，实际 {total}')
+        self.assertEqual(task['range_L'], 1_000_000_000)
+        self.assertEqual(task['range_R'], 1_000_002_000)
 
     def test_global_end_minus_one_is_sum_of_all_prefixes(self):
         self.assertEqual(sequential.global_bounds(sequential_config()),
