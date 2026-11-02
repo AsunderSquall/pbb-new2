@@ -18,6 +18,7 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 ### 修复
 
 - **命令行 `--range-start/--range-end` 在顺序模式下被忽略**：两个参数原先写在任务参数的 `range_L/range_R` 上，而 mode 1 的区间在 `_build_task_config` 里已经按全局区间映射成各前缀的 `prefix_range_*`，事后再改任务参数引擎根本不看——表现为"指定了很小的窗口，却从原位置把整段重扫"（实测一个 2M 候选的窗口跑了十几分钟，修复后 1.9 秒）。现在新增 `apply_range_overrides()`，把覆盖写到配置的全局 `ranges[0]` 上，映射随之生效；随机模式行为不变。
+- **tune 的构建选项从未被 Rebuild 应用**：`autotune` 记录的 `source_hashes` 键是相对"快照根"的 `native/…`，而 `build_settings.load()` 按 `<源码根>/native/…` 解析，真实文件却在 `<源码根>/pbb/native/…` —— 每个文件都"缺失"，整份 profile 被判失效，Rebuild 静默退回默认参数（清单里 `-funroll-loops`、缺 `-DPBB_ATTR_FILTER_MODE=` 就是这个症状），而 `settings/build_config.json` 仍写着 `tested: true`。现在 `load()` 先按源码根解析、找不到再试 `pbb/` 前缀（兼容旧记录），`autotune` 新记录一律写 `pbb/` 前缀，`install()` 同步兼容；实测本机 tune 出来的那份 profile 现在判定 `active=True`。注：本机这份调优的选项与默认参数实测吞吐相同（30 秒同为 2100 task），所以它从未影响速度。
 
 ---
 

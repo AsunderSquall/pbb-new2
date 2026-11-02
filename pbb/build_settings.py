@@ -119,12 +119,19 @@ def load(base, machine, compiler=None):
         active=os.path.normcase(os.path.abspath(compiler))==os.path.normcase(os.path.abspath(value.get('compiler') or ''))
     if active:
         # 逐个核对被记录源码的内容哈希; 任一文件被改或删除即整体失效。
+        # 键是相对**源码根**的路径：新版本写 `pbb/native/src/engine.hpp`；旧版 tune 写的
+        # 是相对「快照根」的 `native/src/engine.hpp`（快照里 native/ 直接挂在根下）。
+        # 真实文件在 `<base>/pbb/native/...`，所以按 base 找不到时再按 `base/pbb` 解析一次
+        # —— 否则整份 profile 永远被判失效，Rebuild 会静默退回默认参数（实际踩到了）。
+        root = Path(base).resolve()
         sources=value.get('source_hashes',{})
         active=bool(sources)
         for rel,expected in sources.items():
-            path=(Path(base)/rel).resolve()
-            if not path.is_relative_to(Path(base).resolve()):raise ValueError('Unsafe source path in build config')
-            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=expected:
+            path=(root/rel).resolve()
+            if not path.is_file():
+                path=(root/'pbb'/rel).resolve()
+            if (not path.is_relative_to(root) or not path.is_file()
+                    or hashlib.sha256(path.read_bytes()).hexdigest()!=expected):
                 active=False;break
     return value,active
 

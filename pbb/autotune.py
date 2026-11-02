@@ -134,7 +134,11 @@ class Tuner:
         shutil.copytree(paths.NATIVE_SRC, self.snapshot/'native'/'src')
         shutil.copy2(paths.ENGINE_MAIN, self.snapshot/'native'/'engine_main.cpp')
         shutil.copy2(paths.FILTER_VERIFY, self.snapshot/'native'/'autotune_filter_verify.cpp')
-        self.sources = {str(p.relative_to(self.snapshot)): digest(p) for p in self.snapshot.rglob('*') if p.is_file()}
+        # 键相对**源码根**（仓库根 / 发布包的 source/）：真实文件是 pbb/native/src/engine.hpp，
+        # 与 build_settings.load() 和 install() 的解析口径一致。旧版写的是快照相对路径
+        # （native/src/engine.hpp），build_settings.load 仍兼容，但新记录一律带 pbb/ 前缀。
+        self.sources = {str(Path('pbb') / p.relative_to(self.snapshot)): digest(p)
+                        for p in self.snapshot.rglob('*') if p.is_file()}
         shutil.copy2(args.config, self.run/('config'+Path(args.config).suffix))
         self.task = _build_task_config(load_config(args.config))
         configured_threads = self.task.get('n_threads', -1)
@@ -577,10 +581,13 @@ def install(run, rollback=False):
     selection = json.loads((run/'selection.json').read_text(encoding='utf8'))
     if selection['status'] != 'complete' or selection['machine'] != build._machine_identity():
         raise RuntimeError('Incomplete result or different host; installation refused')
-    # source_hashes 的键是相对快照根的路径（形如 native/src/engine.hpp），
-    # 与仓库布局一致，因此可以直接在仓库根下逐个复核。
+    # source_hashes 的键相对源码根（新记录形如 pbb/native/src/engine.hpp；旧记录是
+    # 快照相对路径 native/src/engine.hpp），两种都在这里兼容复核。
     for rel,sha in selection['source_hashes'].items():
-        if digest(ROOT/rel) != sha:
+        candidate = ROOT/rel
+        if not candidate.is_file():
+            candidate = ROOT/'pbb'/rel
+        if digest(candidate) != sha:
             raise RuntimeError('Source changed since tuning; rerun: '+rel)
     targets = {name: paths.engine_binary(ui=(name=='ui'), root=ROOT) for name in selection['selected']}
     backup = run/'before_install'
