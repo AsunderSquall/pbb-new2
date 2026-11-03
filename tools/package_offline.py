@@ -212,8 +212,11 @@ def main():
     # 测号输出目录：包根 out/（与 source/、config/ 同级）。
     (root / "out").mkdir(parents=True, exist_ok=True)
     # offline/ 是发布包根目录模板: README/ENVIRONMENT.md 与 8 个外壳脚本。
+    # ENVIRONMENT.md 在发布包里叫 README_ENVIRONMENT.md（environment 归档就是这么命名的，
+    # 合并包沿用同一份名字，离线 README 里引用的也是它）。
     for path in Path("offline").iterdir():
-        copy_file(path, root / path.name)
+        name = "README_ENVIRONMENT.md" if path.name == "ENVIRONMENT.md" else path.name
+        copy_file(path, root / name)
     # 顶层说明文档的 PDF：pure 归档里带了，合并包当然也要有（否则单包里只剩 Markdown）。
     for _markdown, pdf_name in package_release.PDF_SOURCES:
         pdf = Path(pdf_name)
@@ -340,8 +343,11 @@ def combined_archive_path() -> Path:
 def write_combined_archive(root, archive_path) -> Path:
     """把已校验过的合并目录整棵树写进一个 zip（顶层统一为 ``PBB/``）。
 
-    ``root`` 是 ``release_stage/…/PBB``，里面已经是纯包内容 + ``runtime/``。跳过
-    字节码缓存与临时文件（``__pycache__``、``*.pyc``、``*.tmp``），与两个分包一致。
+    ``root`` 是 ``release_stage/…/PBB``，里面已经是纯包内容 + ``runtime/``。两点过滤：
+
+    * 跳过字节码缓存与临时文件（``__pycache__``、``*.pyc``、``*.tmp``），与两个分包一致；
+    * 跳过 ``out/`` 里的内容 —— 验证阶段真的在这里跑过测号，那些结果文件不能发给用户，
+      包里的 ``out/`` 只留一个空目录项（与 pure 归档一致）。
     """
     root = Path(root)
 
@@ -350,9 +356,21 @@ def write_combined_archive(root, archive_path) -> Path:
             relative = path.relative_to(root)
             if not path.is_file():
                 continue
+            if relative.parts and relative.parts[0] == "out":
+                continue
             if "__pycache__" in relative.parts or path.suffix in (".pyc", ".tmp"):
                 continue
             archive.write(path, Path("PBB") / relative)
+        # 空目录要显式写目录项，否则解压后看不到；包根 out/ 永远给一个（见上）。
+        # writestr 不像 write() 那样把 os.sep 归一成 '/'，所以名字自己换。
+        for directory in sorted(path for path in root.rglob("*") if path.is_dir()):
+            relative = directory.relative_to(root)
+            if "__pycache__" in relative.parts:
+                continue
+            if relative.parts != ("out",) and any(directory.iterdir()):
+                continue
+            entry = str(Path("PBB") / relative).replace("\\", "/") + "/"
+            archive.writestr(entry, b"")
 
     return write_zip_atomic(Path(archive_path), fill, compresslevel=6)
 
