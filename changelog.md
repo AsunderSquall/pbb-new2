@@ -15,6 +15,10 @@ PBB 名字评分测号器的版本历史，按 git 提交流水整理。
 
 ## 7.0.7（2026-11-03）
 
+### 变更
+
+- **每次发布产出三个包**：除了 `PBB-windows-x64-pure-<版本>.zip`（只有程序）与 `PBB-windows-x64-environment-<版本>.zip`（只有 Python/GCC 运行时），新增**合并单包 `pbb-<版本>.zip`**（pure + environment 一棵树，解压即用），作为默认下载。`package_offline.py` 在验证完合并布局后一次性写出后两个，合并包就是同一棵已校验的暂存树（`combined_archive_path()` / `write_combined_archive()`），所以不会与两个分包漂移；`docs/PACKAGING.md`、`REPO.md`、随包 `README.md` 都把这条写成固定规则。
+
 ### 修复
 
 - **命令行 `--range-start/--range-end` 在顺序模式下被忽略**：两个参数原先写在任务参数的 `range_L/range_R` 上，而 mode 1 的区间在 `_build_task_config` 里已经按全局区间映射成各前缀的 `prefix_range_*`，事后再改任务参数引擎根本不看——表现为"指定了很小的窗口，却从原位置把整段重扫"（实测一个 2M 候选的窗口跑了十几分钟，修复后 1.9 秒）。现在新增 `apply_range_overrides()`，把覆盖写到配置的全局 `ranges[0]` 上，映射随之生效；随机模式行为不变。

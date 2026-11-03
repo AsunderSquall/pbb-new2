@@ -113,4 +113,33 @@ class DistributionConfigTests(unittest.TestCase):
                     package_release.release_version()          # 格式不对
 
 
+class CombinedArchiveTests(unittest.TestCase):
+    """发布产物必须同时给出 pure、environment 和「两者合一」的单包。"""
+
+    def test_combined_archive_is_named_pbb_version(self):
+        import package_offline
+        version = package_release.release_version()
+        path = package_offline.combined_archive_path()
+        self.assertEqual(path.name, f'pbb-{version}.zip', '合并包名必须是 pbb-<版本>.zip')
+        self.assertEqual(path.parent.name, 'release')
+
+    def test_combined_archive_contains_both_halves(self):
+        import zipfile
+        import package_offline
+        with tempfile.TemporaryDirectory(dir=paths.BUILD_DIR) as directory:
+            root = Path(directory) / 'PBB'
+            (root / 'source').mkdir(parents=True)
+            (root / 'source' / 'main.py').write_text('x', encoding='utf8')
+            (root / 'runtime' / 'python').mkdir(parents=True)
+            (root / 'runtime' / 'python' / 'python.exe').write_bytes(b'MZ')
+            (root / 'source' / '__pycache__').mkdir()
+            (root / 'source' / '__pycache__' / 'x.pyc').write_bytes(b'x')
+            archive = package_offline.write_combined_archive(root, Path(directory) / 'pbb.zip')
+            names = set(zipfile.ZipFile(archive).namelist())
+            self.assertIn('PBB/source/main.py', names, '合并包应含应用本体')
+            self.assertIn('PBB/runtime/python/python.exe', names, '合并包应含随包运行时')
+            self.assertFalse([n for n in names if '__pycache__' in n or n.endswith('.pyc')],
+                             '合并包不应带字节码缓存')
+
+
 if __name__=='__main__':unittest.main()

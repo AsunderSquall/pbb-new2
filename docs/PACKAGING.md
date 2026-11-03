@@ -59,8 +59,22 @@ Run `python package_offline.py` to produce both independent components and verif
 the merged layout with the bundled Python/compiler. **Archive names end with the
 version number**: PBB-windows-x64-pure-<version>.zip and
 PBB-windows-x64-environment-<version>.zip, where <version> is read from the
-repository-root `VERSION` file (e.g. `7.0.4`). Bump `VERSION` when releasing; the
+repository-root `VERSION` file (e.g. `7.0.7`). Bump `VERSION` when releasing; the
 packager refuses to build if the file is missing or not `X.Y.Z`.
+
+**Every release ships three archives, not two** (this is a standing rule):
+
+| Archive | Contents | For |
+| --- | --- | --- |
+| `PBB-windows-x64-pure-<version>.zip` | application only (`source/`, `config/`, `settings/`, `out/`, `charsets/`, `PBBMonitor/`, launchers, docs) | users who already have the environment component, or who have their own Python/GCC |
+| `PBB-windows-x64-environment-<version>.zip` | `runtime/` only (bundled Python + GCC toolchain) | reusable component; pair it with the pure archive |
+| `pbb-<version>.zip` | **pure + environment merged** in one tree | the default download: extract once and run |
+
+`package_release.py` writes the pure archive; `package_offline.py` stages and
+verifies the merged layout, then writes both the environment archive and the
+combined `pbb-<version>.zip` (`combined_archive_path()` / `write_combined_archive()`).
+The combined archive is not a fourth build: it is the same verified stage tree,
+zipped whole, so it can never drift from the two split archives.
 
 `settings/ui_settings.json` is version-controlled and shipped in the package: it
 holds the default startup config and the default scoring thresholds used by

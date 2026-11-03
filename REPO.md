@@ -414,8 +414,14 @@ git tag v<version>
 
 ```powershell
 python -m pip install pyinstaller pybind11 PyYAML
-python tools/package_release.py     # -> release/PBB-windows-x64-pure.zip
-python tools/package_offline.py     # -> release/PBB-windows-x64-environment.zip
+python tools/package_release.py     # -> release/PBB-windows-x64-pure-<版本>.zip
+python tools/package_offline.py     # -> release/PBB-windows-x64-environment-<版本>.zip
+                                    #    与 release/pbb-<版本>.zip（pure + environment 合并包）
 ```
 
-两个 zip 上传到 GitHub Release 作为附件。
+**每次发布都要产出三个包，这是固定规则**：`PBB-windows-x64-pure-<版本>.zip`（只有程序）、
+`PBB-windows-x64-environment-<版本>.zip`（只有 runtime）、`pbb-<版本>.zip`（两者合一，用户默认下载）。
+`package_offline.py` 在验证完合并布局后一次性写出后两个，合并包就是同一棵已校验的暂存树，
+不会与两个分包漂移；`tests/test_distribution_configs.py` 的 `CombinedArchiveTests` 守住命名与内容。
+
+三个 zip 上传到 GitHub Release 作为附件。

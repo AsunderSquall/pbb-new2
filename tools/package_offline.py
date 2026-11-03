@@ -313,5 +313,44 @@ def main():
     archive_path = write_zip_atomic(archive_path, fill, compresslevel=6)
     print(f"[offline] Complete: {archive_path.resolve()} ({archive_path.stat().st_size / 1048576:.1f} MB)", flush=True)
 
+    # ── 单包（pure + environment）：release/pbb-<版本>.zip ──
+    # 上面这个 root 就是"两包合并后的完整布局"，而且刚刚在里面重建 + 跑过测试，
+    # 所以把它整棵树打成一个 zip 就等于给用户一份开箱即用的包，不必再手工合并。
+    combined_path = combined_archive_path()
+    print("[offline] Compressing the combined package (pure + environment)...", flush=True)
+    combined_path = write_combined_archive(root, combined_path)
+    print(f"[offline] Combined: {combined_path.resolve()} "
+          f"({combined_path.stat().st_size / 1048576:.1f} MB)", flush=True)
+
+
+def combined_archive_path() -> Path:
+    """「同时含 pure 与 environment」的单包路径：``release/pbb-<版本>.zip``。
+
+    命名与另外两个产物刻意区分：``PBB-windows-x64-pure-<版本>.zip`` 只含应用、
+    ``PBB-windows-x64-environment-<版本>.zip`` 只含 runtime、``pbb-<版本>.zip`` 是合并包。
+    """
+    return Path(f"release/pbb-{package_release.release_version()}.zip")
+
+
+def write_combined_archive(root, archive_path) -> Path:
+    """把已校验过的合并目录整棵树写进一个 zip（顶层统一为 ``PBB/``）。
+
+    ``root`` 是 ``release_stage/…/PBB``，里面已经是纯包内容 + ``runtime/``。跳过
+    字节码缓存与临时文件（``__pycache__``、``*.pyc``、``*.tmp``），与两个分包一致。
+    """
+    root = Path(root)
+
+    def fill(archive):
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root)
+            if not path.is_file():
+                continue
+            if "__pycache__" in relative.parts or path.suffix in (".pyc", ".tmp"):
+                continue
+            archive.write(path, Path("PBB") / relative)
+
+    return write_zip_atomic(Path(archive_path), fill, compresslevel=6)
+
+
 if __name__ == "__main__":
     main()

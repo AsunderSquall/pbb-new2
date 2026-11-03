@@ -1,6 +1,7 @@
 # PBB pure / environment 使用说明
 
 解压整个 `PBB` 文件夹，勿只复制 exe。适用于 Windows x64，默认二进制使用保守指令集。
+每次发布有三个包：`pbb-<版本>.zip` 是**已经合并好的单包**（pure + environment），解压即用，推荐直接下载这个；`PBB-windows-x64-pure-<版本>.zip` 只含程序，`PBB-windows-x64-environment-<版本>.zip` 只含 Python/GCC 运行时。
 pure 包含程序、源码和配置；environment 是独立的完整 Python/GCC 组件，不是差分补丁。已有环境只更新 pure；没有环境时下载两个包，将它们解压到同一个父目录，合并 PBB 文件夹。runtime 必须与 source、config、PBBMonitor 同级，具体示例见 environment 内的 README_ENVIRONMENT.md。
 
 - `start_ui.bat`：启动测号监控器，无需安装 Python 或编译器。
