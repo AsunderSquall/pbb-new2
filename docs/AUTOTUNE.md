@@ -11,6 +11,8 @@
 
 需要项目 Python 依赖、有效的 Python 核心模块及 GCC/g++；暂不支持 MSVC/icpx 调优。离线包的批处理优先使用随包 Python。测评前暂停其他测号任务，清除自定义 `PBB_CXXFLAGS` / `PBB_SRC_DIR`。多个前缀各自配置枚举范围的模式暂不支持。
 
+**调优请用随机模式的配置**（默认就是 `config/config.yaml`）。`--config` 只决定"拿什么负载去测引擎吞吐"，与你要测什么名字无关；顺序模式（`enumeration.mode: 1`）配置的区间是"全局总控制器 + 每前缀布局"两层的，tune 按 `range_L/range_R` 切测量窗口的算法与它不兼容，会退化成整段扫描。外层的 `tune_full.bat` / `tune_quick.bat` 会把参数透传，需要换负载时用 `tune_full.bat --config <文件名>`；不带时用 `config/config.yaml`，没有该文件则退回 `config_football.yaml`。
+
 ## 持久构建配置
 
 发布包最外层 `settings/build_config.json` 初始为 `tested: false`、`status: "none"`，其他开关为当前默认值。测号配置（`config.yaml`、足球配置和配置示例）放在 `config/`，应用设置（`build_config.json`、`ui_settings.json`）放在 `settings/`；两者都不放在 source 或 PBBMonitor/_internal 中。旧包把 `build_config.json` 放在 `config/` 下，仍然读得到（迁移期兼容），但新写入一律进 `settings/`。未测试时 native 构建使用原有默认参数。普通/UI 引擎通过 `build.py` 读取同一份配置；Python 核心不使用这些引擎优化开关。
