@@ -62,6 +62,13 @@ PBB-windows-x64-environment-<version>.zip, where <version> is read from the
 repository-root `VERSION` file (e.g. `7.0.7`). Bump `VERSION` when releasing; the
 packager refuses to build if the file is missing or not `X.Y.Z`.
 
+**Which number to bump** follows the rule in `changelog.md`（「版本号规则」）:
+major (`X.0.0`) only for large architectural rewrites / whole-project upgrades
+(users should update immediately); minor (`x.Y.0`) for serious bug fixes,
+significant performance gains, a big new module or a key part being redone (users
+should update soon); patch (`x.y.Z`) for assorted small fixes and patches (users
+may update or skip).
+
 **Every release ships three archives, not two** (this is a standing rule):
 
 | Archive | Contents | For |

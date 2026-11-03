@@ -424,4 +424,15 @@ python tools/package_offline.py     # -> release/PBB-windows-x64-environment-<�
 `package_offline.py` 在验证完合并布局后一次性写出后两个，合并包就是同一棵已校验的暂存树，
 不会与两个分包漂移；`tests/test_distribution_configs.py` 的 `CombinedArchiveTests` 守住命名与内容。
 
+**版本号怎么升**（规则的权威位置是 `changelog.md` 的「版本号规则」）：
+
+| 位 | 触发条件 | 给用户的建议 |
+| --- | --- | --- |
+| 大版本 `X.0.0` | 大的架构重构、整个项目完全升级 | 建议立即更新 |
+| 中版本 `x.Y.0` | 修复严重 bug、性能显著提升、新增大模块、关键部分重做 | 推荐尽快更新 |
+| 小版本 `x.y.Z` | 杂七杂八的 bug 修复、零散补丁、小改动 | 可以更新，也可以不更新 |
+
+发版时先改仓库根的 `VERSION`（`X.Y.Z`，打包脚本会校验），再把 changelog 的「未发布」
+小节改成该版本号与日期。
+
 三个 zip 上传到 GitHub Release 作为附件。

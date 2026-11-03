@@ -211,17 +211,24 @@ def main():
     package_release.stage_configs(root)
     # 测号输出目录：包根 out/（与 source/、config/ 同级）。
     (root / "out").mkdir(parents=True, exist_ok=True)
-    # offline/ 是发布包根目录模板: README/ENVIRONMENT.md 与 8 个外壳脚本。
+    # offline/ 是发布包根目录模板: 外壳脚本 + ENVIRONMENT.md。
     # ENVIRONMENT.md 在发布包里叫 README_ENVIRONMENT.md（environment 归档就是这么命名的，
     # 合并包沿用同一份名字，离线 README 里引用的也是它）。
+    # offline/README.md 不放到包根：包根的 README.md 必须与 pure 包一致（仓库的完整手册），
+    # 这份短说明仍然随源码出现在 source/offline/README.md。
     for path in Path("offline").iterdir():
+        if path.name == "README.md":
+            continue
         name = "README_ENVIRONMENT.md" if path.name == "ENVIRONMENT.md" else path.name
         copy_file(path, root / name)
-    # 顶层说明文档的 PDF：pure 归档里带了，合并包当然也要有（否则单包里只剩 Markdown）。
-    for _markdown, pdf_name in package_release.PDF_SOURCES:
-        pdf = Path(pdf_name)
-        if pdf.is_file():
-            copy_file(pdf, root / pdf_name)
+    # 顶层文档与 pure 包保持一致：README.md / 先读我.md / 两份 PDF / PACKAGING.md。
+    for markdown, pdf_name in package_release.PDF_SOURCES:
+        if Path(markdown).is_file():
+            copy_file(Path(markdown), root / markdown)
+        if Path(pdf_name).is_file():
+            copy_file(Path(pdf_name), root / pdf_name)
+    if Path("docs/PACKAGING.md").is_file():
+        copy_file(Path("docs/PACKAGING.md"), root / "PACKAGING.md")
     # 先放一份保守基线二进制; 后面验证时会用随包工具链重新编译并覆盖它们。
     copy_baseline_binaries(root / "source/build")
     if not args.resume_stage:
