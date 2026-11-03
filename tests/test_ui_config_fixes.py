@@ -384,5 +384,50 @@ class SingleLineInputTests(unittest.TestCase):
             root.destroy()
 
 
+class LowThreadWarningTests(unittest.TestCase):
+    """启动线程低于自动值的 75% 时先确认：是=继续启动，否=取消。"""
+
+    def setUp(self):
+        self.app = ui.Monitor()
+
+    def tearDown(self):
+        for callback in self.app.tk.call('after', 'info'):
+            self.app.after_cancel(callback)
+        self.app.destroy()
+
+    def confirm(self, threads, auto, answer=False):
+        with patch.object(ui, 'available_threads', return_value=auto), \
+             patch.object(ui.messagebox, 'askyesno', return_value=answer) as ask:
+            self.app.threads_var.set(str(threads))
+            return self.app._confirm_thread_count(), ask
+
+    def test_below_75_percent_asks_and_can_abort(self):
+        allowed, ask = self.confirm(6, 32, answer=False)
+        self.assertFalse(allowed, '选「否」时不应继续启动')
+        ask.assert_called_once()
+        self.assertIn('75%', ask.call_args.args[1])
+        allowed, ask = self.confirm(6, 32, answer=True)
+        self.assertTrue(allowed, '选「是」时照原样启动')
+
+    def test_at_or_above_75_percent_starts_silently(self):
+        for threads in (24, 32):          # 24/32 正好 75%，要求"低于"才提示
+            allowed, ask = self.confirm(threads, 32)
+            self.assertTrue(allowed, threads)
+            ask.assert_not_called()
+
+    def test_auto_threads_never_prompt(self):
+        allowed, ask = self.confirm(-1, 32)
+        self.assertTrue(allowed)
+        ask.assert_not_called()
+
+    def test_declining_does_not_start_a_run(self):
+        with patch.object(ui, 'available_threads', return_value=32), \
+             patch.object(ui.messagebox, 'askyesno', return_value=False):
+            self.app.threads_var.set('4')
+            self.app._start()
+        self.assertFalse(self.app.running, '取消后不应进入运行态')
+        self.assertIn('已取消启动', self.app.status_var.get())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2949,6 +2949,34 @@ class Monitor(tk.Tk):
         ranges[0]["end"] = end
         self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，预计总量这一格不生效")
 
+    # 启动线程低于「自动值 × 这个比例」时先问一句（见 _confirm_thread_count）。
+    LOW_THREAD_RATIO = 0.75
+
+    def _confirm_thread_count(self) -> bool:
+        """启动前确认线程数：低于自动值的 75% 时询问一次，返回是否继续。
+
+        **为什么问**：``-1``（自动）算出来的是这块 CPU 的并行度上限；手工填一个明显
+        更小的数，通常意味着"想省电"或"以为多了会抢资源"，但代价是测号时间成倍增加，
+        autotune 也测不准（候选数不足线程数 × 100 万时线程跑不满，``speed`` 偏低）。
+        这里只提醒、不改用户填的值：选「是」照原样启动，选「否」直接取消。
+
+        边界：正好 75% 不提示（要求"低于"）；``-1`` 解析成自动值本身，也不提示。
+        """
+        try:
+            requested = int(str(self.threads_var.get()).strip() or -1)
+        except (TypeError, ValueError):
+            return True                      # 非法值留给 _start 里的范围校验报错
+        auto = available_threads()
+        effective = resolve_threads(requested)
+        if auto <= 0 or effective >= auto * self.LOW_THREAD_RATIO:
+            return True
+        percent = effective * 100 // max(1, auto)
+        return bool(messagebox.askyesno(
+            "线程数偏低",
+            f"启动线程低于总线程数的 75%，是否继续启动？\n\n"
+            f"当前：{effective} / {auto} 线程（{percent}%）",
+            parent=self))
+
     def _start(self):
         """校验界面输入并启动一次测号任务（图形监控器入口）。
 
@@ -2958,6 +2986,10 @@ class Monitor(tk.Tk):
         任何异常都弹窗提示且不进入运行态。
         """
         if self.running:
+            return
+        # 线程数明显低于自动值时先确认，避免"以为在省电、实际白跑一倍时间"。
+        if not self._confirm_thread_count():
+            self.status_var.set("已取消启动：启动线程低于总线程数的 75%")
             return
         resume = self.resume_var.get()
         rebuild = self.rebuild_var.get()
