@@ -174,8 +174,14 @@ def stage_configs(root):
 
 
 def distribution_charsets():
-    """随外层词族配置提供一份词库，保持../charsets/相对路径可用。"""
-    return {name: (ROOT / 'charsets' / name).read_bytes() for name in CHARSET_NAMES}
+    """随外层词族配置提供一份词库，保持 ``../charsets/`` 相对路径可用。
+
+    词库在**包根** ``charsets/``（发布包里与 ``source/`` 同级），所以按
+    ``build_settings.package_root(ROOT)`` 取，不能写死 ``ROOT/'charsets'``——
+    否则在发布包内跑测试（离线验证会跑整套）会找不到文件。
+    """
+    root = build_settings.package_root(ROOT)
+    return {name: (root / 'charsets' / name).read_bytes() for name in CHARSET_NAMES}
 
 
 def check_entry_points() -> None:

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from pbb import threading_config as threads
+from pbb import build_settings, threading_config as threads
 from pbb import ui
 from pbb.main import _build_task_config
 
@@ -30,9 +30,9 @@ class ThreadDefaultsTests(unittest.TestCase):
             self.assertEqual(threads.available_threads(),4)
 
     def test_shipped_configs_use_auto_and_manual_override_survives(self):
-        root=Path(__file__).resolve().parent.parent
+        root=Path(build_settings.config_root(Path(__file__).resolve().parent.parent))
         for name in ('config_football.yaml','config_flex.example.yaml','config.example.yaml','config.example.json','config.example.toml'):
-            cfg=ui.load_config(str(root/'config'/name))
+            cfg=ui.load_config(str(root/name))
             self.assertEqual(_build_task_config(cfg)['n_threads'],-1)
             cfg['threads']['worker_threads']=7
             self.assertEqual(threads.resolve_threads(_build_task_config(cfg)['n_threads']),7)

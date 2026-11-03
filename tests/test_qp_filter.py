@@ -8,8 +8,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from pbb import engine, paths, ui
+from pbb import build_settings, engine, paths, ui
 from pbb.main import _validate_config
+# 发布包里 config/ 在包根（与 source/ 同级），所以按 config_root 解析而不是 ROOT/'config'。
+CONFIG_ROOT = Path(build_settings.config_root(ROOT))
 
 
 class DefaultScoreTests(unittest.TestCase):
@@ -21,7 +23,7 @@ class DefaultScoreTests(unittest.TestCase):
         self.assertNotEqual(resume_id({},b'a',[]),old)
 
     def test_new_defaults_include_pp_pd_and_old_missing_fields_stay_disabled(self):
-        for path in [ROOT/'config'/('config.example.'+ext) for ext in ('yaml','json','toml')]+[ROOT/'config/config_flex.example.yaml',ROOT/'config/config_football.yaml']:
+        for path in [CONFIG_ROOT/('config.example.'+ext) for ext in ('yaml','json','toml')]+[CONFIG_ROOT/'config_flex.example.yaml',CONFIG_ROOT/'config_football.yaml']:
             cfg=ui.load_config(str(path))
             self.assertEqual(cfg['collection']['min_pp'],8000)
             self.assertEqual(cfg['collection']['min_pd'],8800)
@@ -120,7 +122,7 @@ class QpFilterEngineTests(unittest.TestCase):
     def supplied_task(self):
         """复用真实默认阈值和线程；仅把候选范围缩为用户提供的完整名字。"""
         from pbb.main import _build_task_config
-        task=_build_task_config(ui.load_config(str(ROOT/'config/config_football.yaml')))
+        task=_build_task_config(ui.load_config(str(CONFIG_ROOT/'config_football.yaml')))
         candidate='帕秋莉 R6PIXzP'
         task.update(candidate=candidate,team_name='Squall',prefixes=[candidate[:-1]],suffixes=[''],
                     scl=1,variable_len=1,range_L=0,range_R=1,mode=1,
