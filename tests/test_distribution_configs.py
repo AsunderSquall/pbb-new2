@@ -8,13 +8,19 @@ import unittest
 ROOT=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'tools'))
 import package_release
-from pbb import engine, flex, paths, ui
+from pbb import build_settings, engine, flex, paths, ui
 from pbb.main import _build_task_config, _validate_config
+
+# 发布流程相关的用例（VERSION、归档命名、发布内容打包）只能在**仓库根**跑：发布包里没有
+# VERSION，也没有 config/charsets 的原始布局。离线包验证会跑整套测试，所以这里显式跳过，
+# 而不是让"包内跑整套"变成红灯。
+_REPO_INPUTS = (Path(package_release.ROOT) / 'VERSION').is_file()
+_REPO_ONLY = unittest.skipUnless(_REPO_INPUTS, '需要仓库根（VERSION 等），发布包内跳过')
 
 
 class DistributionConfigTests(unittest.TestCase):
     def test_all_bundled_search_configs_include_pp_and_pd(self):
-        files=[ROOT/'config'/n for n in package_release.CONFIG_NAMES if n!='build_config.json']
+        files=[build_settings.config_root(ROOT)/n for n in package_release.CONFIG_NAMES if n!='build_config.json']
         linux=ROOT/'pbb_linux/config'
         if linux.is_dir():
             files.extend(p for p in linux.glob('config*') if p.suffix in ('.yaml','.json','.toml'))
@@ -39,7 +45,7 @@ class DistributionConfigTests(unittest.TestCase):
         降频，核多的机器用不满，测速数据也不可与别的机器比较。pbb_linux 的配置是从
         那份文件复制的，同样必须保持 -1。这条用例把该回退钉住。
         """
-        files=[ROOT/'config'/n for n in package_release.CONFIG_NAMES if n!='build_config.json']
+        files=[build_settings.config_root(ROOT)/n for n in package_release.CONFIG_NAMES if n!='build_config.json']
         linux=ROOT/'pbb_linux/config'
         if linux.is_dir():
             files.extend(p for p in linux.glob('config*') if p.suffix in ('.yaml','.json','.toml'))
@@ -53,6 +59,7 @@ class DistributionConfigTests(unittest.TestCase):
                 checked+=1
         self.assertGreaterEqual(checked,6)
 
+    @_REPO_ONLY
     def test_outer_config_word_files_and_archive_payload_match(self):
         configs=package_release.distribution_configs()
         self.assertIn('config_words_sequential.yaml',configs)
@@ -86,11 +93,13 @@ class DistributionConfigTests(unittest.TestCase):
         import yaml
         settings = package_release.distribution_settings()
         shipped = json.loads(settings['ui_settings.json'])
+        # 发布包里 config/ 在包根（与 source/ 同级），所以走 config_root 而不是 ROOT。
         football = yaml.safe_load(
-            (Path(package_release.ROOT) / 'config/config_football.yaml').read_text(encoding='utf8'))
+            (Path(build_settings.config_root(ROOT)) / 'config_football.yaml').read_text(encoding='utf8'))
         self.assertEqual(shipped['collection'], football['collection'])
         self.assertEqual(shipped['default_config'], 'config_football.yaml')
 
+    @_REPO_ONLY
     def test_release_archive_names_end_with_the_version(self):
         """归档名必须以 -<版本号> 结尾，版本号来自仓库根 VERSION。"""
         import re
@@ -116,6 +125,7 @@ class DistributionConfigTests(unittest.TestCase):
 class CombinedArchiveTests(unittest.TestCase):
     """发布产物必须同时给出 pure、environment 和「两者合一」的单包。"""
 
+    @_REPO_ONLY
     def test_combined_archive_is_named_pbb_version(self):
         import package_offline
         version = package_release.release_version()

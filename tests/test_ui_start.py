@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 ROOT=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(ROOT))
+from pbb import build_settings
 from pbb import ui
 
 
@@ -13,7 +14,7 @@ class StartEntryTests(unittest.TestCase):
     def test_normal_and_resume_start_resolve_result_before_launch(self):
         for resume in (False,True):
             with self.subTest(resume=resume):
-                cfg=ui.load_config(str(ROOT/'config/config_football.yaml'))
+                cfg=ui.load_config(str(Path(build_settings.config_root(ROOT))/"config_football.yaml"))
                 owner=Mock(running=False)
                 owner.resume_var.get.return_value=resume
                 owner.rebuild_var.get.return_value=False

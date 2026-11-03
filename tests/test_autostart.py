@@ -152,7 +152,7 @@ class CliAutoStartTests(unittest.TestCase):
     def run_cli(self, *extra):
         return subprocess.run(
             [sys.executable, "-m", "pbb.main", "-c", str(self.path), "--threads", "2", *extra],
-            cwd=str(paths.PACKAGE_ROOT), capture_output=True, text=True, encoding="utf8",
+            cwd=str(paths.REPO_ROOT), capture_output=True, text=True, encoding="utf8",
             errors="replace", timeout=300)
 
     def test_start_is_updated_by_default(self):

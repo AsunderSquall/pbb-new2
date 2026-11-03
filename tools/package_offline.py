@@ -214,6 +214,11 @@ def main():
     # offline/ 是发布包根目录模板: README/ENVIRONMENT.md 与 8 个外壳脚本。
     for path in Path("offline").iterdir():
         copy_file(path, root / path.name)
+    # 顶层说明文档的 PDF：pure 归档里带了，合并包当然也要有（否则单包里只剩 Markdown）。
+    for _markdown, pdf_name in package_release.PDF_SOURCES:
+        pdf = Path(pdf_name)
+        if pdf.is_file():
+            copy_file(pdf, root / pdf_name)
     # 先放一份保守基线二进制; 后面验证时会用随包工具链重新编译并覆盖它们。
     copy_baseline_binaries(root / "source/build")
     if not args.resume_stage:
