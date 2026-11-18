@@ -19,7 +19,7 @@ PBB 名字评分测号器 — Python 编排层.
 config → engine 键名映射: 见 config_schema.py (CONFIG_MAP)，唯一定义处。
 新增配置字段只需在 CONFIG_MAP 加一行，main.py 和 engine.py 自动同步。
 """
-import json, os, sys, time, argparse, uuid, tempfile
+import json, os, sys, time, argparse, uuid, tempfile, unicodedata
 from datetime import datetime
 from typing import Any, Optional
 
@@ -412,6 +412,61 @@ def _check_name_text(where: str, value: str) -> None:
                  f"后面的前缀/后缀。请改成其它字符，当前: {value!r}")
 
 
+def _name_byte_lengths(cfg: dict) -> tuple[int, int]:
+    # 按 UTF-8 字节计算；“+”是空前后缀标记，战队名不属于这里的名字长度。
+    if 'format' in cfg:
+        families = cfg['character_sets']
+        variable = sum(families[item['charset']]['single_char_length']
+                       for item in cfg['format'] if isinstance(item, dict))
+        fixed = sum(len(item.encode('utf8')) for item in cfg['format'] if isinstance(item, str))
+    else:
+        variable = cfg['character_set']['single_char_length'] * cfg['enumeration']['variable_length']
+        fixed = 0
+    affixes = sum(max((len(item['name'].encode('utf8')) if item['name'] != '+' else 0
+                      for item in cfg.get(key, [{'name': '+'}])), default=0)
+                  for key in ('prefixes', 'suffixes'))
+    return variable, variable + fixed + affixes
+
+
+def _config_warnings(cfg: dict) -> list[str]:
+    # 提示与硬校验分开：打开编辑器不弹窗，保存或启动时由界面统一提示。
+    messages = []
+    try:
+        variable, total = _name_byte_lengths(cfg)
+        if variable > 64 and total <= 256:
+            messages.append(f'随机部分较长（{variable} 字节，超过 64 字节），仍可继续保存和运行。')
+    except (KeyError, TypeError, ValueError):
+        pass  # 不完整配置交给硬校验报告，不用警告掩盖真正的错误。
+    families = cfg.get('character_sets', {}) if 'format' in cfg else {'默认': cfg.get('character_set', {})}
+    if not isinstance(families, dict):
+        return messages
+    for name, cs in families.items():
+        if not isinstance(cs, dict) or type(cs.get('single_char_length')) is not int:
+            continue
+        custom_types = {1: (4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(cs['single_char_length'], (1,))
+        types = cs.get('types', [])
+        if not isinstance(types, list) or not any(kind in custom_types for kind in types):
+            continue
+        custom = cs.get('custom_values', '')
+        if isinstance(custom, list):
+            try:
+                custom = bytes(custom).decode('utf8')
+            except (TypeError, ValueError):
+                messages.append(f'自定义字符中出现非法字符（{name}）：字节列表不是合法的 UTF-8 文本。')
+                continue
+        if not isinstance(custom, str):
+            continue
+        invalid = list(dict.fromkeys(
+            ord(char) for char in custom
+            if char.isspace() or unicodedata.category(char) in ('Cc', 'Cf', 'Cs', 'Cn')
+            or ord(char) in (0x034F, 0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0)
+            or 0xFE00 <= ord(char) <= 0xFE0F or 0xE0100 <= ord(char) <= 0xE01EF))
+        if invalid:
+            codes = '、'.join(f'U+{cp:04X}' for cp in invalid[:8])
+            messages.append(f'自定义字符中出现非法字符（{name}）：{codes}。包含不可见字符或无效 Unicode 字符，请检查。')
+    return messages
+
+
 def _validate_config(cfg: dict):
     """校验配置字段合法性, 不合法立即退出.
 
@@ -454,8 +509,8 @@ def _validate_config(cfg: dict):
     # ── character_set ──
     cs = cfg.get("character_set", {})
     scl = cs.get("single_char_length")
-    if not isinstance(scl, int) or scl < 1:
-        _die(f"character_set.single_char_length 必须为正整数, 当前: {scl}")
+    if type(scl) is not int or not 1 <= scl <= 64:
+        _die(f"单字符字节数（character_set.single_char_length）必须为 1~64 的整数, 当前: {scl}")
 
     types = cs.get("types", [])
     if not isinstance(types, list) or not types:
@@ -466,14 +521,15 @@ def _validate_config(cfg: dict):
         if not isinstance(t, int) or t < 1 or t > tmax:
             _die(f"character_set.types: scl={scl} 时 type 必须为 1~{tmax}, 当前: {t}")
 
-    custom = cs.get("custom_values")
-    if custom is not None:
+    custom_types = {1: (4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(scl, (1,))
+    if any(kind in custom_types for kind in types):
+        custom = cs.get("custom_values")
         if not isinstance(custom, (str, list)):
+            if custom is None:
+                _die("已选择自定义字符，character_set.custom_values 不能为空")
             _die("character_set.custom_values 必须为字符串或数字列表")
-        if isinstance(custom, str) and len(custom) == 0:
-            _die("character_set.custom_values 不能为空字符串")
-        if isinstance(custom, list) and len(custom) == 0:
-            _die("character_set.custom_values 不能为空列表")
+        if not custom:
+            _die("已选择自定义字符，character_set.custom_values 不能为空")
 
     # ── enumeration ──
     en = cfg.get("enumeration", {})
@@ -484,6 +540,10 @@ def _validate_config(cfg: dict):
     vlen = en.get("variable_length")
     if not isinstance(vlen, int) or vlen < 1:
         _die(f"enumeration.variable_length 必须为正整数, 当前: {vlen}")
+
+    _variable_bytes, name_bytes = _name_byte_lengths(cfg)
+    if name_bytes > 256:
+        _die(f"名字过长：随机部分加固定内容及最长前后缀共 {name_bytes} 字节，不能超过 256 字节。")
 
     ranges = en.get("ranges", [])
     if not isinstance(ranges, list) or not ranges:

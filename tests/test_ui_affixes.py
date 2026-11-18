@@ -13,6 +13,7 @@ sys.path.insert(0, str(_REPO / 'tools'))
 
 from pbb import ui
 from pbb.ui import Monitor, load_config
+from pbb.main import ConfigError
 
 
 class AffixWarningTests(unittest.TestCase):
@@ -73,7 +74,10 @@ class AffixEditorTests(unittest.TestCase):
             self.app = Monitor()
             self.app._open_editor()
             self.app.update_idletasks()
-        self.addCleanup(self.app.destroy)
+        def close():
+            self.app._cancel_scheduled_after()
+            self.app.destroy()
+        self.addCleanup(close)
 
     # 两种前后缀视图（分开编辑 / 一一对应编辑）来回切换时，用户已填的前缀名、起始
     # 范围和后缀都不能丢：转换只改展示方式，不改变配置语义。
@@ -154,6 +158,27 @@ class AffixEditorTests(unittest.TestCase):
         app.charset_unicode_text.delete('1.0','end');app.charset_unicode_text.insert('1.0','U+4E20-U+4E22')
         self.assertEqual(app._editor_config()['character_set']['unicode_ranges'],[dict(start=0x4e20,end=0x4e22)])
 
+    def test_unicode_ranges_accept_codepoints_and_utf8_bytes(self):
+        expected = [{'start': 0x10F70, 'end': 0x10FAF}]
+        self.reopen_charset({'single_char_length': 4, 'types': [3], 'unicode_ranges': expected})
+        app = self.app
+        self.assertEqual(app.charset_unicode_text.get('1.0', 'end-1c'), 'U+10F70-U+10FAF')
+        for value in ('U+10F70-U+10FAF', '0xF090BDB0-0xF090BEAF', 'u+10f70 - 0XF090BEAF'):
+            with self.subTest(value=value):
+                app.charset_unicode_text.delete('1.0', 'end')
+                app.charset_unicode_text.insert('1.0', value)
+                self.assertEqual(app._editor_config()['character_set']['unicode_ranges'], expected)
+
+    def test_unicode_range_reports_invalid_endpoint_and_line(self):
+        self.reopen_charset({'single_char_length': 4, 'types': [3]})
+        app = self.app
+        for endpoint in ('0xF090BD', '0xF090BDB', '0x4142', '0x4E00'):
+            with self.subTest(endpoint=endpoint):
+                app.charset_unicode_text.delete('1.0', 'end')
+                app.charset_unicode_text.insert('1.0', f'U+10F70-U+10FAF\n{endpoint}-U+10FAF')
+                with self.assertRaisesRegex(ValueError, rf'第 2 行.*{endpoint}.*UTF-8'):
+                    app._editor_config()
+
     # 每个字节宽度各自记住自己的类型选择：1→2→1 来回切换后，1 字节那份选择
     # （[3,1]）必须原样恢复，不能把 2 字节下勾选的类型带过来。
     # 同时自定义内容要能在数字字节列表与文本之间正确往返。
@@ -165,6 +190,54 @@ class AffixEditorTests(unittest.TestCase):
         app.charset_type_vars[2].set(True)
         app.editor_vars['character_set.single_char_length'].set('1');app._refresh_charset_types()
         self.assertEqual(app._editor_config()['character_set']['types'],[3,1])
+
+    def test_blank_custom_placeholder_is_not_configuration_content(self):
+        self.reopen_charset(ui.blank_config()['character_set'])
+        app = self.app
+        app.charset_type_vars[4].set(True)
+        app.update()
+        self.assertEqual(app.charset_custom_text.get('1.0', 'end-1c'), '')
+        self.assertEqual(app._editor_config()['character_set']['custom_values'], '')
+        self.assertEqual(app.charset_custom_hint.winfo_manager(), 'place')
+        self.assertEqual(app.charset_custom_hint.cget('text'),
+                         '单字符字节数为 3 时用中文 ("你好世界"), 为4 时用 emoji ("🐒🐵")')
+        app.editor_vars['character_set.custom_values'].set('你好世界')
+        app.update()
+        self.assertFalse(app.charset_custom_hint.winfo_manager())
+        app.editor_vars['character_set.custom_values'].set('')
+        app.update()
+        self.assertEqual(app.charset_custom_hint.winfo_manager(), 'place')
+        self.assertEqual(app._editor_config()['character_set']['custom_values'], '')
+
+    def test_character_width_is_an_entry_with_range_validation(self):
+        app = self.app
+        entry = app.charset_byte_entry
+        self.assertEqual(entry.winfo_class(), 'TEntry')
+        for raw in ('0', '65', '-1', 'x'):
+            with self.subTest(raw=raw), patch.object(ui.messagebox, 'showerror') as error:
+                entry.delete(0, 'end')
+                entry.insert(0, raw)
+                app.update()
+                error.assert_called_once()
+                self.assertEqual(entry.get(), '')
+                with self.assertRaisesRegex(ValueError, '1~64'):
+                    app._editor_config()
+        entry.insert(0, '64')
+        self.assertEqual(app._editor_config()['character_set']['single_char_length'], 64)
+        self.assertEqual(app.charset_width, 64)
+
+    def test_empty_custom_values_allow_unchecked_custom_type(self):
+        self.reopen_charset({'single_char_length': 3, 'types': [1, 7], 'custom_values': '你好'})
+        app = self.app
+        app.charset_type_vars[7].set(False)
+        app.editor_vars['character_set.custom_values'].set('')
+        cfg = app._editor_config()
+        self.assertEqual(cfg['character_set']['types'], [1])
+        self.assertEqual(cfg['character_set']['custom_values'], '')
+        ui._validate_config(cfg)
+        app.charset_type_vars[7].set(True)
+        with self.assertRaisesRegex(ConfigError, '自定义字符.*不能为空'):
+            ui._validate_config(app._editor_config())
 
     # score_list 由界面自动维护：在某族上填了正阈值，保存时该族必须自动进入 score_list。
     #

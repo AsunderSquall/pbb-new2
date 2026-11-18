@@ -14,8 +14,9 @@
 // ===== 扩展汉字数据 (CJK Ext-A ~ Ext-G) =====
 // hanzi_3: 长度 3 字节的扩展汉字 (6400 个), 每个 3 字节 UTF-8
 // hanzi_4: 长度 4 字节的扩展汉字 (64287 个), 每个 4 字节 UTF-8
-inline int hanzi_3[19200];           // 6400 chars × 3 bytes
-inline int hanzi_4[257148];          // 64287 chars × 4 bytes
+// 下标按字节递增，数组元素也必须是字节，避免 int 步长在字符间留下空字节。
+inline unsigned char hanzi_3[19200]; // 6400 chars × 3 bytes
+inline unsigned char hanzi_4[257148]; // 64287 chars × 4 bytes
 inline int hanzi_cnt_3 = -1;         // hanzi_3 当前写入位置
 inline int hanzi_len_3;              // hanzi_3 中的字符数量
 inline int hanzi_cnt_4 = -1;         // hanzi_4 当前写入位置

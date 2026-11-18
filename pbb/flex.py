@@ -55,8 +55,8 @@ def normalize_config(cfg):
         if not isinstance(name, str) or not name or not isinstance(cs, dict):
             raise ValueError('字符集族必须使用非空名字和字符集配置')
         width = cs.get('single_char_length')
-        if type(width) is not int or not 1 <= width <= 511:
-            raise ValueError(f'字符集族 {name} 的 single_char_length 必须为 1..511')
+        if type(width) is not int or not 1 <= width <= 64:
+            raise ValueError(f'字符集族 {name} 的单字符字节数（single_char_length）必须为 1~64 的整数')
         if 'file' in cs:
             if not isinstance(cs['file'], str) or not cs['file'] or any(k in cs for k in ('types', 'custom_values', 'unicode_ranges')):
                 raise ValueError(f'字符集族 {name} 的 file 必须为路径，不能同时指定内置或自定义来源')
@@ -114,8 +114,11 @@ def normalize_config(cfg):
     for p in result['prefixes']:
         for s in result['suffixes']:
             affixes = ''.join(x['name'] if x['name'] != '+' else '' for x in (p, s))
-            if '\0' in affixes or length + len(affixes.encode('utf8')) >= 512:
-                raise ValueError('格式加前后缀必须少于 512 字节且不含 NUL')
+            if '\0' in affixes:
+                raise ValueError('格式加前后缀不能包含 NUL')
+            total = length + len(affixes.encode('utf8'))
+            if total > 256:
+                raise ValueError(f'名字过长：格式加前后缀共 {total} 字节，不能超过 256 字节。')
     result.setdefault('enumeration', {})['variable_length'] = count
     result['character_set'] = {'single_char_length': 1, 'types': [1]}
     return result

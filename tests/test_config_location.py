@@ -115,7 +115,7 @@ class ConfigLocationTests(unittest.TestCase):
                 self.assertTrue(current.exists())
                 error.assert_not_called()
 
-    # 编辑器只有一个「保存」按钮：目标由文件名决定，缺扩展名补 .yaml，
+    # 编辑器只有一个「保存」按钮：目标由文件名决定，缺扩展名补 .toml，
     # 且目录固定为 CONFIG_DIR（用户粘进整条路径也不会写歪）。
     def test_save_editor_targets_config_dir_by_name(self):
         cfg=ui.load_config('config_football.yaml')
@@ -129,7 +129,7 @@ class ConfigLocationTests(unittest.TestCase):
             with patch.object(ui,'CONFIG_DIR',str(root)),patch.object(ui.messagebox,'showerror') as error:
                 ui.Monitor._save_editor(owner)
                 error.assert_not_called()
-            saved=root/'我的配置.yaml'
+            saved=root/'我的配置.toml'
             self.assertTrue(saved.is_file(),f"应保存为 {saved}")
             self.assertEqual(ui.load_config(str(saved)),cfg)
 

@@ -11,6 +11,34 @@ from pbb import ui
 
 
 class StartEntryTests(unittest.TestCase):
+    def test_long_random_warns_and_still_starts_but_overlong_name_does_not(self):
+        for length in (65, 257):
+            with self.subTest(length=length):
+                cfg = ui.blank_config()
+                cfg['enumeration']['variable_length'] = length
+                owner = Mock(running=False)
+                owner.resume_var.get.return_value = False
+                owner.rebuild_var.get.return_value = False
+                owner.threads_var.get.return_value = '2'
+                owner.range_var.get.return_value = '100'
+                owner._families_from_task.return_value = ['qp']
+                owner.expanded_families = set()
+                with patch.object(ui, 'load_config', return_value=cfg), \
+                     patch.object(ui, '_resolve_result_file', return_value='test.txt'), \
+                     patch.object(ui.messagebox, 'showwarning') as warning, \
+                     patch.object(ui.messagebox, 'showerror') as error, \
+                     patch.object(ui.threading, 'Thread') as worker:
+                    ui.Monitor._start(owner)
+                self.assertEqual(owner.running, length == 65)
+                if length == 65:
+                    warning.assert_called_once()
+                    error.assert_not_called()
+                    worker.return_value.start.assert_called_once()
+                else:
+                    warning.assert_not_called()
+                    error.assert_called_once()
+                    worker.assert_not_called()
+
     def test_normal_and_resume_start_resolve_result_before_launch(self):
         for resume in (False,True):
             with self.subTest(resume=resume):

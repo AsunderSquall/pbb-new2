@@ -15,14 +15,14 @@ import tempfile
 import tkinter as tk
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tools'))
 
 from pbb import ui                                    # noqa: E402
-from pbb.main import ConfigError, _validate_config    # noqa: E402
+from pbb.main import ConfigError, _config_warnings, _validate_config    # noqa: E402
 
 
 def base_config(**enumeration):
@@ -89,6 +89,120 @@ class NameCharacterTests(unittest.TestCase):
         cfg['suffixes'] = [{'name': '后 卫 '}]
         cfg['team_name'] = ' 队 伍 '
         _validate_config(cfg)
+
+
+class CharacterAndLengthValidationTests(unittest.TestCase):
+    """字节上限按实际 UTF-8 计算，提示不能代替或扩大硬限制。"""
+
+    def test_character_width_bounds_and_input_errors(self):
+        for width in (1, 64):
+            cfg = base_config(variable_length=1)
+            cfg['character_set'] = {'single_char_length': width, 'types': [1], 'custom_values': 'a' * width}
+            _validate_config(cfg)
+            self.assertEqual(ui._parse_charset_width(str(width)), width)
+        for width in (0, -1, 65, True, 3.0, '3', None):
+            cfg = base_config()
+            cfg['character_set']['single_char_length'] = width
+            with self.subTest(width=width), self.assertRaisesRegex(ConfigError, '1~64'):
+                _validate_config(cfg)
+        for raw in ('', '0', '65', '-1', '3.0', 'a', ' 3', '３'):
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, '1~64'):
+                ui._parse_charset_width(raw)
+
+    def test_empty_custom_values_only_require_content_when_selected(self):
+        for width, builtin, custom_type in ((1, 1, 4), (1, 1, 5), (2, 1, 7),
+                                             (3, 1, 7), (3, 5, 7), (4, 1, 2)):
+            for empty in ('', [], None):
+                with self.subTest(width=width, builtin=builtin, empty=empty):
+                    cfg = base_config(variable_length=1)
+                    cs = {'single_char_length': width, 'types': [builtin], 'custom_values': empty}
+                    cfg['character_set'] = cs
+                    _validate_config(cfg)
+                    self.assertEqual(_config_warnings(cfg), [])
+                    cfg['character_sets'] = {'内置': cs}
+                    cfg['format'] = [{'charset': '内置'}]
+                    _validate_config(cfg)
+                    cfg.pop('character_sets')
+                    cfg.pop('format')
+                    cs['types'] = [builtin, custom_type]
+                    with self.assertRaisesRegex(ConfigError, '自定义字符.*不能为空'):
+                        _validate_config(cfg)
+
+    def test_name_limit_counts_longest_affixes_in_utf8_bytes(self):
+        cfg = base_config(variable_length=64)
+        cfg['character_set'] = {'single_char_length': 3, 'types': [5]}
+        cfg['prefixes'] = [{'name': '+'}, {'name': '中' * 20}]
+        cfg['suffixes'] = [{'name': '+'}, {'name': 'abcd'}]
+        _validate_config(cfg)  # 192 + 60 + 4 = 256，允许边界。
+        cfg['suffixes'][1]['name'] += 'x'
+        with self.assertRaisesRegex(ConfigError, '257.*256'):
+            _validate_config(cfg)
+        cfg['prefixes'] = cfg['suffixes'] = [{'name': '+'}]
+        cfg['character_set'] = {'single_char_length': 1, 'types': [1]}
+        cfg['enumeration']['variable_length'] = 256
+        _validate_config(cfg)  # “+”不能算成额外的两个字节。
+
+    def test_flex_width_and_total_name_limits(self):
+        cfg = base_config()
+        cfg['character_sets'] = {'字符': {'single_char_length': 64, 'types': [1], 'custom_values': 'a' * 64}}
+        cfg['format'] = [{'charset': '字符'}] * 3 + ['x' * 58]
+        _validate_config(cfg)  # 192 + 58 + “前后”的 6 字节 = 256。
+        cfg['format'][-1] += 'x'
+        with self.assertRaisesRegex(ConfigError, '257.*256'):
+            _validate_config(cfg)
+        cfg['character_sets']['字符']['single_char_length'] = 65
+        with self.assertRaisesRegex(ConfigError, '1~64'):
+            _validate_config(cfg)
+
+    def test_long_random_part_is_only_a_warning(self):
+        cfg = base_config(variable_length=64)
+        self.assertEqual(_config_warnings(cfg), [])
+        cfg['enumeration']['variable_length'] = 65
+        _validate_config(cfg)
+        self.assertIn('随机部分较长', '\n'.join(_config_warnings(cfg)))
+        cfg['character_sets'] = {'数字': cfg['character_set']}
+        cfg['format'] = [{'charset': '数字'}] * 65
+        cfg.pop('prefixes')
+        cfg.pop('suffixes')
+        _validate_config(cfg)
+        self.assertIn('随机部分较长', '\n'.join(_config_warnings(cfg)))
+
+    def test_invisible_and_invalid_unicode_warn_without_changing_content(self):
+        cfg = base_config()
+        cfg['character_set'] = {'single_char_length': 3, 'types': [7]}
+        for custom in ('你好\u200b', 'a\n', ' ', '\ud800', '\uffff', '\u2800', [0xff]):
+            with self.subTest(custom=repr(custom)):
+                cfg['character_set']['custom_values'] = custom
+                self.assertIn('自定义字符中出现非法字符', '\n'.join(_config_warnings(cfg)))
+                self.assertEqual(cfg['character_set']['custom_values'], custom)
+        for custom in ('你好世界', '🐒🐵', [0xE4, 0xBD, 0xA0]):
+            cfg['character_set']['custom_values'] = custom
+            self.assertEqual(_config_warnings(cfg), [])
+        cfg['character_set'].update(types=[5], custom_values='\u200b')
+        self.assertEqual(_config_warnings(cfg), [])
+
+    def test_save_warns_but_allows_long_random_and_rejects_overlong_names(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ui, 'CONFIG_DIR', directory):
+            for length in (65, 257):
+                cfg = base_config(variable_length=length)
+                cfg['prefixes'] = cfg['suffixes'] = [{'name': '+'}]
+                owner = types.SimpleNamespace(
+                    _editor_config=lambda: cfg, _confirm_affix_mismatch=lambda _: True,
+                    editor_name_var=Mock(get=lambda: str(length)), config_var=Mock(),
+                    _set_config_path=Mock(), _sync_config_controls=Mock(), status_var=Mock(), editor=None,
+                )
+                with patch.object(ui.messagebox, 'showwarning') as warning, \
+                     patch.object(ui.messagebox, 'showerror') as error:
+                    ui.Monitor._save_editor(owner)
+                target = Path(directory) / f'{length}.toml'
+                self.assertEqual(target.exists(), length == 65)
+                if length == 65:
+                    warning.assert_called_once()
+                    error.assert_not_called()
+                    self.assertEqual(ui.load_config(str(target))['enumeration']['variable_length'], 65)
+                else:
+                    error.assert_called_once()
+                    warning.assert_not_called()
 
 
 class RangeEndApplicationTests(unittest.TestCase):

@@ -297,12 +297,11 @@ class BuiltinCharsetSizeTests(unittest.TestCase):
             raise unittest.SkipTest(f"原生字符集模块尚未构建：{exc}")
 
     def test_builtin_tables_have_their_actual_sizes(self):
-        core = ui.engine_runner._pbb_core()
         expected = {
             2: {1: 24, 2: 24, 3: 33, 4: 33, 5: 31, 6: 31},
             3: {1: 20992, 2: 3500, 3: 74, 4: 74, 5: 255,
-                6: len(core.get_extended_hanzi_3_bytes()) // 3},
-            4: {1: len(core.get_extended_hanzi_4_bytes()) // 4},
+                6: 6400},
+            4: {1: 64287},
         }
         for width, tables in expected.items():
             for kind, size in tables.items():

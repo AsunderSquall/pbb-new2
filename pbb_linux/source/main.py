@@ -405,14 +405,15 @@ def _validate_config(cfg: dict):
         if not isinstance(t, int) or t < 1 or t > tmax:
             _die(f"character_set.types: scl={scl} 时 type 必须为 1~{tmax}, 当前: {t}")
 
-    custom = cs.get("custom_values")
-    if custom is not None:
+    custom_types = {1: (4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(scl, (1,))
+    if any(kind in custom_types for kind in types):
+        custom = cs.get("custom_values")
         if not isinstance(custom, (str, list)):
+            if custom is None:
+                _die("已选择自定义字符，character_set.custom_values 不能为空")
             _die("character_set.custom_values 必须为字符串或数字列表")
-        if isinstance(custom, str) and len(custom) == 0:
-            _die("character_set.custom_values 不能为空字符串")
-        if isinstance(custom, list) and len(custom) == 0:
-            _die("character_set.custom_values 不能为空列表")
+        if not custom:
+            _die("已选择自定义字符，character_set.custom_values 不能为空")
 
     # ── enumeration ──
     en = cfg.get("enumeration", {})

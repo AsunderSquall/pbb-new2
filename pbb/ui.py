@@ -28,7 +28,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import autostart, build_settings, config_file, engine as engine_runner, paths
 from ._build import _compile_engine, _binary_is_current, ensure_core
-from .main import _build_task_config, _resolve_result_file, _validate_config
+from .main import _build_task_config, _config_warnings, _resolve_result_file, _validate_config
 from .threading_config import available_threads, resolve_threads
 
 
@@ -114,8 +114,7 @@ def blank_config() -> dict:
     阈值就改这个文件；缺这段时退回 CONFIG_MAP 的默认值。
 
     关键取舍：
-      - 字符集用「自定义字符」且给一个非空占位（校验要求自定义字符非空），
-        并把它写成 "" + 2 个占位字符，避免用户面对一个必然报错的空配置；
+      - 字符集默认用数字，自定义字符留空，示例由编辑器的灰字提示显示，避免误存为内容；
       - 前缀/后缀各留一个空前缀、空后缀（配置语义里 "+" 就是空串）；
       - team_name 必须非空，否则校验直接失败，所以给一个占位名提醒用户去改。
     """
@@ -141,7 +140,7 @@ def blank_config() -> dict:
     cfg["character_set"] = {
         "single_char_length": 1,
         "types": [1],
-        "custom_values": "示例",
+        "custom_values": "",
         "unicode_ranges": [],
         "output_charset": 1,
     }
@@ -494,6 +493,73 @@ class SimpleTextValue:
         self.widget.delete("1.0", "end")
         if value:
             self.widget.insert("1.0", str(value))
+
+
+def _text_placeholder(widget, text, color):
+    # 独立标签覆盖空文本框，提示永远不进入 Text 内容或撤销历史。
+    hint = tk.Label(widget, text=text, fg=color, bg=widget.cget('bg'),
+                    font=widget.cget('font'), justify='left', anchor='nw', cursor='xterm')
+
+    def refresh(_event=None):
+        if widget.edit_modified():
+            widget.edit_modified(False)
+        hint.configure(wraplength=max(1, widget.winfo_width() - 16))
+        if widget.get('1.0', 'end-1c'):
+            hint.place_forget()
+        else:
+            hint.place(x=7, y=5, relwidth=1, width=-14)
+
+    widget.bind('<<Modified>>', refresh, add='+')
+    widget.bind('<Configure>', refresh, add='+')
+    hint.bind('<Button-1>', lambda _event: widget.focus_set())
+    refresh()
+    return hint
+
+
+def _parse_charset_width(raw):
+    if not re.fullmatch(r'[0-9]+', raw) or not 1 <= int(raw) <= 64:
+        raise ValueError('单字符字节数必须为 1~64 的整数。')
+    return int(raw)
+
+
+def _parse_unicode_endpoint(token: str) -> int:
+    prefix = token[:2].lower()
+    if prefix == '0x':
+        digits = token[2:]
+        if re.fullmatch(r'(?:[0-9A-Fa-f]{2}){1,4}', digits):
+            try:
+                char = bytes.fromhex(digits).decode('utf-8')
+                if len(char) == 1:
+                    return ord(char)
+            except UnicodeDecodeError:
+                pass
+        raise ValueError(f'{token} 须为一个字符的 UTF-8 字节，每字节写两位十六进制，如 0xF090BDB0。'
+                         '填写码点时请用 U+，如 U+10F70。')
+
+    try:
+        codepoint = int(token[2:], 16) if prefix == 'u+' else int(token, 0)
+    except ValueError:
+        raise ValueError(f'{token!r} 无法识别，请用 U+10F70 或 0xF090BDB0。') from None
+    if not 0 <= codepoint <= 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+        raise ValueError(f'{token} 须为 U+0000 到 U+10FFFF 的有效码点（排除代理码点）。')
+    return codepoint
+
+
+def _valid_charset_width_input(raw):
+    # 删除时允许暂时留空；保存时仍由 _parse_charset_width 拒绝空值。
+    if not raw:
+        return True
+    try:
+        _parse_charset_width(raw)
+    except ValueError:
+        return False
+    return True
+
+
+def _show_config_warnings(cfg, parent=None):
+    messages = _config_warnings(cfg)
+    if messages:
+        messagebox.showwarning('配置提示', '\n\n'.join(messages), parent=parent)
 
 
 # 单行输入里不该出现、而且肉眼完全看不见的字符。粘贴多行文本时 Tk 的 Entry 会把这些
@@ -947,10 +1013,10 @@ class ConfigSelector(tk.Toplevel):
         """
         cfg = blank_config()
         stem = "新配置"
-        target = os.path.join(CONFIG_DIR, f"{stem}.yaml")
+        target = os.path.join(CONFIG_DIR, f"{stem}.toml")
         index = 2
         while os.path.exists(target):
-            target = os.path.join(CONFIG_DIR, f"{stem}_{index}.yaml")
+            target = os.path.join(CONFIG_DIR, f"{stem}_{index}.toml")
             index += 1
         self.monitor._pending_editor_cfg = cfg
         # 编辑器保留建议文件名；保存后 _on_editor_closed 会刷新表格（那时才新增一行）
@@ -2132,11 +2198,12 @@ class Monitor(tk.Tk):
         self.affix_view = "分开编辑"
         self.affix_view_var = tk.StringVar(value=self.affix_view)
 
-        def field(parent, row, label, key, value, column=0, width=26):
+        def field(parent, row, label, key, value, column=0, width=26, sanitize=True):
             ttk.Label(parent, text=label).grid(row=row, column=column * 2, sticky="w", padx=(0, 8), pady=6)
             var = tk.StringVar(value=single_line_text(str(value)))
             # 单行输入：粘贴进的换行/制表符直接丢掉，不留在框里（见 sanitize_single_line）
-            sanitize_single_line(var)
+            if sanitize:
+                sanitize_single_line(var)
             self.editor_vars[key] = var
             entry = ttk.Entry(parent, textvariable=var, width=width)
             entry.grid(row=row, column=column * 2 + 1, sticky="ew", pady=6)
@@ -2184,7 +2251,13 @@ class Monitor(tk.Tk):
         for row, label, key, value in basic_fields:
             field(basic, row, label, key, value)
         mode_box = choice(basic, 2, "枚举模式", "enumeration.mode", self._cfg_value(cfg, "enumeration.mode", 2), ENUMERATION_MODES)
-        choice(basic, 5, "单字符字节数", "character_set.single_char_length", cs.get("single_char_length", 1), {str(value): value for value in range(1, 9)})
+        self.charset_byte_entry = field(basic, 5, "单字符字节数", "character_set.single_char_length",
+                                        cs.get("single_char_length", 1), sanitize=False)
+        self.charset_byte_entry.configure(
+            validate='key',
+            validatecommand=(self.charset_byte_entry.register(_valid_charset_width_input), '%P'),
+            invalidcommand=self.charset_byte_entry.register(lambda: self.editor.after_idle(
+                lambda: messagebox.showerror('单字符字节数无效', '单字符字节数必须为 1~64 的整数。', parent=self.editor))))
         type_row = 6
         ttk.Label(basic, text="字符类型").grid(row=type_row, column=0, sticky="w", padx=(0, 8), pady=6)
         self.charset_types_frame = ttk.Frame(basic)
@@ -2205,15 +2278,24 @@ class Monitor(tk.Tk):
             self.charset_custom_frame, 0,
             "自定义字符 / JSON 字节列表", "character_set.custom_values",
             custom_text, height_lines=6)
+        self.charset_custom_hint = _text_placeholder(
+            self.charset_custom_text,
+            '单字符字节数为 3 时用中文 ("你好世界"), 为4 时用 emoji ("🐒🐵")',
+            _blend_colors(self.colors['field'], self.colors['text'], 0.5))
         self.charset_custom_frame.columnconfigure(1,weight=1)
         self.charset_unicode_frame = ttk.Frame(basic)
         self.charset_unicode_frame.grid(row=8,column=0,columnspan=2,sticky="ew",pady=6)
-        ttk.Label(self.charset_unicode_frame,text="Unicode 区间（每行一段，如 0x4E00-0x9FFF）").pack(anchor="w")
+        ttk.Label(self.charset_unicode_frame, justify='left', text=(
+            'Unicode 区间（每行一段，包含两个端点）\n'
+            'U+ 表示码点，例如 U+10F70-U+10FAF\n'
+            '0x 表示 UTF-8 字节，例如 0xF090BDB0-0xF090BEAF'
+        )).pack(anchor='w')
         self.charset_unicode_text = tk.Text(self.charset_unicode_frame,height=3,width=44)
         self.charset_unicode_text.pack(fill="x")
-        self.charset_unicode_text.insert('1.0','\n'.join(f"0x{r['start']:X}-0x{r['end']:X}" for r in cs.get('unicode_ranges',[])))
-        byte_box = next(widget for widget in basic.grid_slaves(row=5, column=1) if isinstance(widget, ttk.Combobox))
-        byte_box.bind("<<ComboboxSelected>>", self._refresh_charset_types)
+        self.charset_unicode_text.insert('1.0', '\n'.join(
+            f"U+{r['start']:04X}-U+{r['end']:04X}" for r in cs.get('unicode_ranges', [])
+        ))
+        self.editor_vars['character_set.single_char_length'].trace_add('write', lambda *_: self._refresh_charset_types())
         self._refresh_charset_types()
         basic.columnconfigure(1, weight=1)
 
@@ -2426,9 +2508,14 @@ class Monitor(tk.Tk):
             code for code in self.charset_type_vars if code in selected and code not in self.charset_type_order]
 
     def _refresh_charset_types(self, _event=None):
+        try:
+            scl = _parse_charset_width(self.editor_vars['character_set.single_char_length'].get())
+        except ValueError:
+            return
+        if self.charset_type_vars and scl == self.charset_width:
+            return
         if self.charset_type_vars:
             self.charset_selections[self.charset_width]=self._selected_charset_types()
-        scl=int(self.editor_vars['character_set.single_char_length'].get())
         options=CHARSET_TYPES.get(scl, {'自定义字符':1,'Unicode 区间':2})
         self.charset_width=scl
         self.charset_type_order=list(self.charset_selections.get(scl,[next(iter(options.values()))]))
@@ -2514,7 +2601,7 @@ class Monitor(tk.Tk):
         else:
             cfg["enumeration"].pop("prefix_ranges", None)
         cs = cfg["character_set"]
-        cs["single_char_length"] = self.editor_choice_maps["character_set.single_char_length"][self.editor_vars["character_set.single_char_length"].get()]
+        cs["single_char_length"] = _parse_charset_width(self.editor_vars["character_set.single_char_length"].get())
         cs["types"] = self._selected_charset_types()
         if not cs["types"]:raise ValueError('请至少选择一种字符类型。')
         custom_text=self.editor_vars["character_set.custom_values"].get()
@@ -2525,18 +2612,26 @@ class Monitor(tk.Tk):
         options=CHARSET_TYPES.get(cs['single_char_length'], {'自定义字符':1,'Unicode 区间':2})
         unicode_code=options.get('Unicode 区间')
         if unicode_code in cs['types']:
-            ranges=[]
-            for line in self.charset_unicode_text.get('1.0','end').splitlines():
-                if not line.strip():continue
-                tokens=re.split(r'\s*-\s*',line.strip())
-                if len(tokens)!=2:raise ValueError('Unicode 区间应为 开始-结束，每行一段。')
-                def codepoint(token):
-                    return int(token[2:],16) if token.upper().startswith('U+') else int(token,0)
-                start,end=map(codepoint,tokens)
-                if not 0<=start<=end<=0x10ffff:raise ValueError('Unicode 区间超出有效范围。')
-                ranges.append(dict(start=start,end=end))
-            if not ranges:raise ValueError('请选择至少一段 Unicode 区间。')
-            cs['unicode_ranges']=ranges
+            ranges = []
+            for line_no, line in enumerate(self.charset_unicode_text.get('1.0', 'end').splitlines(), 1):
+                if not line.strip():
+                    continue
+                where = f'Unicode 区间第 {line_no} 行'
+                tokens = line.split('-')
+                if len(tokens) != 2 or not all(token.strip() for token in tokens):
+                    raise ValueError(f'{where}应为「开始-结束」。')
+                try:
+                    start, end = (_parse_unicode_endpoint(token.strip()) for token in tokens)
+                except ValueError as exc:
+                    raise ValueError(f'{where}：{exc}') from exc
+                if start > end:
+                    raise ValueError(f'{where}的起始码点不能大于结束码点。')
+                if start <= 0xDFFF and end >= 0xD800:
+                    raise ValueError(f'{where}不能包含代理码点 U+D800 至 U+DFFF。')
+                ranges.append({'start': start, 'end': end})
+            if not ranges:
+                raise ValueError('请选择至少一段 Unicode 区间。')
+            cs['unicode_ranges'] = ranges
         for family in FAMILIES:
             cfg["collection"][f"min_{family}"] = integer(f"collection.min_{family}")
         for family in ("cp", "fp", "wc", "fs", "pj"):
@@ -2663,7 +2758,7 @@ class Monitor(tk.Tk):
         """保存编辑器内容到 **一个** 目标文件。
 
         目标名的确定顺序：
-          1. 显式传入的 ``name``（配置选择器/主窗口输入框给的）——缺扩展名时补 .yaml，
+          1. 显式传入的 ``name``（配置选择器/主窗口输入框给的）——缺扩展名时补 .toml，
              只取文件名部分，目录固定为 config/；
           2. 否则用编辑器顶部输入框里的名字；
           3. 再否则保留当前配置文件的文件名。
@@ -2674,6 +2769,7 @@ class Monitor(tk.Tk):
         """
         try:
             cfg = self._editor_config()
+            _show_config_warnings(cfg, self.editor)
             _validate_config(cfg)
             if not self._confirm_affix_mismatch(cfg):
                 return
@@ -2684,7 +2780,7 @@ class Monitor(tk.Tk):
             if not raw:
                 raise ValueError("请先填写配置文件名。")
             if not os.path.splitext(raw)[1]:
-                raw += ".yaml"
+                raw += ".toml"
             target = os.path.join(CONFIG_DIR, raw)
             save_config(target, cfg)
         except Exception as exc:
@@ -2724,14 +2820,14 @@ class Monitor(tk.Tk):
 
         输入框允许用户直接手打文件名，所以这里做两件事：
           - 只取文件名部分，避免用户粘进整条路径后拼出奇怪的结果；
-          - 补上默认扩展名 ``.yaml``（config/ 下的配置以 .yaml 为主）。
+          - 缺扩展名时补上默认的 ``.toml``，与新建配置的保存格式一致。
         """
         raw = self.config_name_var.get().strip()
         name = os.path.basename(raw.replace("\\", "/")) if raw else ""
         if not name:
             return ""
         if not os.path.splitext(name)[1]:
-            name += ".yaml"
+            name += ".toml"
         return os.path.join(CONFIG_DIR, name)
 
     def _set_config_path(self, path: str):
@@ -3003,6 +3099,7 @@ class Monitor(tk.Tk):
             config_path = self._config_path()
             cfg = load_config(config_path)
             self._run_last_saved_config = copy.deepcopy(cfg)
+            _show_config_warnings(cfg, self)
             _validate_config(cfg)
             self._apply_range_end(cfg)
             self._run_result_file = _resolve_result_file(self._selected_result_file())
