@@ -2751,6 +2751,8 @@ class Monitor(tk.Tk):
 
         口径与 engine.py 的 _build_charset 一致：同一 scl 下各类型依次拼接、不去重。
         类型码含义见 engine.py 的 docstring（1 字节: 1数字/2小写/3大写/4,5自定义）。
+        内置多字节表与 Unicode 区间直接复用引擎构建，避免漏算或维护两套表；
+        简单字符集仍在本地计算，未构建原生扩展时也能显示。
         """
         scl = int(cs.get("single_char_length", 0) or 0)
         if scl < 1:
@@ -2758,6 +2760,10 @@ class Monitor(tk.Tk):
         if 'file' in cs:
             from .flex import file_bytes
             return len(file_bytes(cs)) // scl
+        local_types = {1: (1, 2, 3, 4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(scl, (1,))
+        if any(t not in local_types for t in cs.get("types", []) or []):
+            raw = bytes.fromhex(engine_runner._build_charset(cs))
+            return len(raw) // scl
         custom = cs.get("custom_values")
         if isinstance(custom, str):
             custom_bytes = custom.encode("utf-8")

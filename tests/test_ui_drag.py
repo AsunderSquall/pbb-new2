@@ -286,6 +286,78 @@ class CharsetSizeTests(unittest.TestCase):
             {"single_char_length": 1, "types": [4], "custom_values": ["x"]}), 0)
 
 
+class BuiltinCharsetSizeTests(unittest.TestCase):
+    """配置摘要必须包含内置表与 Unicode 区间，且保留引擎的重复单元。"""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            ui.engine_runner._pbb_core()
+        except ImportError as exc:
+            raise unittest.SkipTest(f"原生字符集模块尚未构建：{exc}")
+
+    def test_builtin_tables_have_their_actual_sizes(self):
+        core = ui.engine_runner._pbb_core()
+        expected = {
+            2: {1: 24, 2: 24, 3: 33, 4: 33, 5: 31, 6: 31},
+            3: {1: 20992, 2: 3500, 3: 74, 4: 74, 5: 255,
+                6: len(core.get_extended_hanzi_3_bytes()) // 3},
+            4: {1: len(core.get_extended_hanzi_4_bytes()) // 4},
+        }
+        for width, tables in expected.items():
+            for kind, size in tables.items():
+                with self.subTest(width=width, kind=kind):
+                    self.assertEqual(Monitor._charset_size({
+                        'single_char_length': width, 'types': [kind],
+                        'custom_values': '🐒🐵🐊🦎🐍🐛🙈🙉🙊🐉',
+                    }), size)
+
+    def test_unicode_ranges_are_counted_at_each_width(self):
+        for width, kind, start, end, size in (
+            (2, 8, 0x3B1, 0x3B3, 3),
+            (3, 8, 0x2801, 0x2803, 3),
+            (4, 3, 0x1F412, 0x1F413, 2),
+            (6, 2, 0x4E00, 0x4E03, 2),
+        ):
+            with self.subTest(width=width):
+                self.assertEqual(Monitor._charset_size({
+                    'single_char_length': width, 'types': [kind],
+                    'unicode_ranges': [{'start': start, 'end': end}],
+                }), size)
+
+    def test_mixed_types_and_overlapping_characters_are_not_deduplicated(self):
+        self.assertEqual(Monitor._charset_size({
+            'single_char_length': 3, 'types': [5, 7, 8, 5],
+            'custom_values': '⠁⠂',
+            'unicode_ranges': [{'start': 0x2801, 'end': 0x2803}],
+        }), 255 + 2 + 3 + 255)
+
+    def test_braille_toml_and_flex_summaries(self):
+        import tempfile
+        cfg = ui.blank_config()
+        cfg['character_set'] = {
+            'single_char_length': 3, 'types': [5],
+            'custom_values': '🐒🐵🐊🦎🐍🐛🙈🙉🙊🐉', 'unicode_ranges': [],
+        }
+        cfg['prefixes'] = [{'name': str(i)} for i in range(36)]
+        cfg['enumeration']['variable_length'] = 7
+        owner = SimpleNamespace(_charset_size=Monitor._charset_size)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config-outer.toml'
+            ui.save_config(path, cfg)
+            summary = Monitor._config_summary(owner, ui.load_config(str(path)))
+        self.assertEqual(summary['prefixes'], 36)
+        self.assertEqual(summary['variable_length'], 7)
+        self.assertEqual(summary['single_char_length'], 3)
+        self.assertEqual(summary['charset_size'], 255)
+        cfg['character_sets'] = {
+            '盲文': cfg['character_set'],
+            '数字': {'single_char_length': 1, 'types': [1]},
+        }
+        cfg['format'] = [{'charset': '盲文'}, {'charset': '数字'}]
+        self.assertEqual(Monitor._config_summary(owner, cfg)['charset_size'], '255/10')
+
+
 class AdvanceStartTests(unittest.TestCase):
     # 续测叠加语义：回写基准是**本次实际起步位置**（续测起点），不是配置文件里的 start。
     # 否则续测过的会话会把 start 写小，下次启动重扫一段。
