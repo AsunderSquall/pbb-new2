@@ -283,10 +283,10 @@ def main():
     # 用随包 Python + GCC 重建三个原生二进制: 证明工具链自洽, 而不是靠开发机上的编译器。
     print("[offline] Rebuilding all three native binaries with bundled Python and GCC...", flush=True)
     run_verified([python, "tools/rebuild_local.py", "--no-sync"], source, environment)
-    # 真跑一次小规模测号(range-end 100 万 + 固定种子): 覆盖配置解析、引擎执行与结果输出。
+    # 真跑一次小规模测号，关闭进度回写，避免把随包默认配置改成已测完的区间。
     print("[offline] Running main.py with the rebuilt Python core...", flush=True)
     run_verified([python, "main.py", "-c", "../config/config_football.yaml", "--threads", "2",
-                  "--range-end", "1000000", "--seed", "123"], source, environment)
+                  "--range-end", "1000000", "--seed", "123", "--no-auto-start"], source, environment)
     print("[offline] Testing UI events, ordinary engine, editor and build safeguards...", flush=True)
     # 测试文件在 source/tests/ 下，用 discover 运行；各测试自带 sys.path 引导，
     # 保证在被搬进发布包的 source/ 目录后仍能 import pbb 包与 tools/ 下的模块。
