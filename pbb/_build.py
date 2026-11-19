@@ -535,8 +535,8 @@ def _mingw_python_link() -> list[str]:
     ver = f"{sys.version_info.major}{sys.version_info.minor}"
     lib_a = os.path.join(cache_dir, f"libpython{ver}.a")
 
-    if os.path.exists(lib_a):
-        # 已有缓存: 直接给出 -L/-l, 省掉一次 gendef+dlltool。
+    if os.path.isfile(lib_a) and os.path.getsize(lib_a) > 8:
+        # dlltool 失败可能留下空文件或只有归档头的库，不能复用。
         return [f"-L{cache_dir}", f"-lpython{ver}"]
 
     # Find python DLL
@@ -616,14 +616,16 @@ def _mingw_python_link() -> list[str]:
                 gendef_out = os.path.join(cache_dir, f)
                 break
 
-    r2 = subprocess.run([dlltool, "-d", gendef_out, "-l", lib_a, "-D", dll],
+    # dlltool 根据输出名生成汇编临时文件。用相对文件名避免长路径使生成中途失败。
+    r2 = subprocess.run([dlltool, "-d", os.path.basename(gendef_out),
+                         "-l", os.path.basename(lib_a), "-D", os.path.basename(dll)],
                          capture_output=True, cwd=cache_dir, encoding='utf-8', errors='replace')
     if r2.returncode != 0:
         print(f"[build] WARNING: dlltool failed: {r2.stderr[-200:]}", file=sys.stderr)
         return _py_link_flags()
 
     # 成功生成导入库后才给出 MinGW 链接参数; 否则仍走 MSVC 风格回退。
-    if os.path.exists(lib_a):
+    if os.path.isfile(lib_a) and os.path.getsize(lib_a) > 8:
         print(f"[build] Generated MinGW lib: {lib_a}", file=sys.stderr)
         return [f"-L{cache_dir}", f"-lpython{ver}"]
     return _py_link_flags()
