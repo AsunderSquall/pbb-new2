@@ -110,12 +110,16 @@ class Tuner:
     def __init__(self, args):
         from . import _build as build
         from . import engine
-        from .main import _build_task_config
-        from .ui import load_config
+        from .main import _build_task_config, _validate_config
+        from .config_file import load_config
         self.build, self.engine, self.args = build, engine, args
         if os.environ.get('PBB_CXXFLAGS', '').strip() or os.environ.get('PBB_SRC_DIR', '').strip():
             raise RuntimeError('Unset PBB_CXXFLAGS and PBB_SRC_DIR before tuning; custom baselines are not supported.')
         os.environ['PBB_BUILD_MODE'] = 'native'
+        config = load_config(args.config)
+        _validate_config(config)
+        if config['enumeration']['mode'] == 1 or config['enumeration'].get('prefix_ranges'):
+            raise ValueError('自动测速需要随机模式且不带逐前缀区间，请选择模式 2、3 或 4 的配置')
         self.started = time.monotonic()
         self.test_budget = args.minutes*60
         self.test_used = self.compile_seconds = 0.
@@ -140,7 +144,7 @@ class Tuner:
         self.sources = {str(Path('pbb') / p.relative_to(self.snapshot)): digest(p)
                         for p in self.snapshot.rglob('*') if p.is_file()}
         shutil.copy2(args.config, self.run/('config'+Path(args.config).suffix))
-        self.task = _build_task_config(load_config(args.config))
+        self.task = _build_task_config(config)
         configured_threads = self.task.get('n_threads', -1)
         self.available_threads = available_threads()
         self.task['n_threads'] = resolve_threads(configured_threads)
@@ -342,7 +346,7 @@ class Tuner:
           - 五种字节宽度：1 / 2 / 3 / 4 / 6 字节单元，各配一个非 ASCII 字符集；
           - 枚举模式：quick 覆盖 1/2，full 再补 3/4；
           - 每个任务都带前缀、后缀、队伍名，并把 output_xp 打开（要能对拍分数列）；
-          - collect_mode 按 mode%3 轮换，让 0/1/2 三种收集规则都被走到；
+          - collect_mode 按 mode%2 轮换，覆盖关闭和预设收集；
           - 范围起点取 999997：故意跨 chunk 边界，覆盖尾批与复制边界。
         第二组专门做「长后缀」：63/64/65/66 字节，用来撞 256 字节技能数据的容量哨兵边界。
         所有族的阈值都压到 1，目的只是保证有命中可以对比，不代表生产门控。
@@ -355,7 +359,7 @@ class Tuner:
                 t = dict(self.task, scl=scl, mode=mode, prefixes=['前','另'], suffixes=['后'],
                          team_name='验证', variable_len=7, range_L=999997, range_R=2000000,
                          score_list=','.join(FAMILIES), score_mode='all', output_xp=1,
-                         seed=SEEDS[mode%3], collect_mode=mode%3)
+                         seed=SEEDS[mode%3], collect_mode=mode%2)
                 for family in FAMILIES:
                     t['min_'+family] = 1
                 # 编码矩阵仍验证指定的五种编码，不能被用户格式覆盖。
@@ -467,6 +471,8 @@ class Tuner:
         units=trials_per_pass*passes_count*(2*rounds+1)+(2*final_rounds+1)
         self.planned_seconds=max(.05,self.left()*.80/max(1,units))
         self.count=candidate_count(self.args.speed*.9,self.planned_seconds,multiplier)
+        if start+self.count >= 2**64:
+            raise ValueError('测速范围超过 2^64-1，请减小测试时长或更换起点较小的配置')
         self.performance=dict(self.task,range_L=start,range_R=start+self.count,seed=SEEDS[0])
         save(self.run/'test_plan.json',dict(speed_tday=self.args.speed,test_minutes=self.args.minutes,
             planning_speed_tday=self.args.speed*.9,speed_factor=.9,time_limit='soft',
@@ -665,11 +671,22 @@ def main():
     if args.install_from or args.rollback_from:
         install(args.install_from or args.rollback_from,rollback=bool(args.rollback_from))
         return
-    if args.speed is None:
-        args.speed=float(input('此前测号速度是多少 T/day？（浮点数，例如 1.5）：'))
-    if args.minutes is None:
-        entered=input('期望测试多少分钟？（不含编译，推荐 20，回车使用 20）：') if args.budget is None else ''
-        args.minutes=args.budget/60 if args.budget is not None else float(entered.strip() or '20')
+    if args.apply and args.no_write_config:
+        parser.error('--apply 和 --no-write-config 不能同时使用')
+    config_path = Path(args.config)
+    if not config_path.is_absolute() and not config_path.is_file():
+        config_path = config_root / config_path
+    if not config_path.is_file():
+        parser.error(f'配置文件不存在：{config_path}')
+    args.config = str(config_path.resolve())
+    try:
+        if args.speed is None:
+            args.speed = float(input('此前测号速度是多少 T/day？（浮点数，例如 1.5）：'))
+        if args.minutes is None:
+            entered = input('期望测试多少分钟？（不含编译，推荐 20，回车使用 20）：') if args.budget is None else ''
+            args.minutes = args.budget / 60 if args.budget is not None else float(entered.strip() or '20')
+    except (EOFError, ValueError):
+        parser.error('请填写有效的测号速度和测试时长，或使用 --speed 和 --minutes')
     if not all(math.isfinite(x) and x>0 for x in (args.speed,args.minutes)) or not math.isfinite(args.minimum) or args.minimum<0:
         parser.error('speed/minutes must be finite and positive; minimum >= 0')
     tuner=None
@@ -690,4 +707,9 @@ def main():
 
 
 if __name__=='__main__':
-    main()
+    from .main import ConfigError
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, OverflowError, ConfigError) as exc:
+        print(f'自动测速失败：{exc}', file=sys.stderr)
+        sys.exit(1)
