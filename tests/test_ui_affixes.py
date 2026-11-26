@@ -44,7 +44,8 @@ class AffixWarningTests(unittest.TestCase):
     # builtins.open 被 mock 成 mock_open，用来断言“根本没写文件”。
     def test_cancel_prevents_save_and_start(self):
         for start in (False, True):
-            owner = SimpleNamespace(_editor_config=Mock(return_value={}), editor=None,
+            cfg = {'collection': {'score_list': 'qp'}}
+            owner = SimpleNamespace(_editor_config=Mock(return_value=cfg), editor=None,
                                     _confirm_affix_mismatch=Mock(return_value=False), _start=Mock())
             with patch.object(ui, "_validate_config"), patch("builtins.open", mock_open()) as output:
                 Monitor._save_editor(owner, start=start)
@@ -170,7 +171,8 @@ class AffixEditorTests(unittest.TestCase):
                 self.assertEqual(app._editor_config()['character_set']['unicode_ranges'], expected)
 
     def test_unicode_range_reports_invalid_endpoint_and_line(self):
-        self.reopen_charset({'single_char_length': 4, 'types': [3]})
+        self.reopen_charset({'single_char_length': 4, 'types': [3],
+                             'unicode_ranges': [{'start': 0x10F70, 'end': 0x10FAF}]})
         app = self.app
         for endpoint in ('0xF090BD', '0xF090BDB', '0x4142', '0x4E00'):
             with self.subTest(endpoint=endpoint):
@@ -258,6 +260,20 @@ class AffixEditorTests(unittest.TestCase):
         # 界面上的输入框也要跟着更新，否则用户看到的还是旧值。
         self.assertEqual(app.editor_vars["collection.score_list"].get(),
                          "qp,qd,cqd,cp,fp,wc,fs,pj")
+
+    def test_blank_score_list_is_not_refilled_before_save(self):
+        app = self.app
+        app.editor_vars['collection.score_list'].set('')
+        app.editor_vars['collection.min_qp'].set('5400')
+        cfg = app._editor_config()
+        self.assertEqual(cfg['collection']['score_list'], '')
+        self.assertEqual(app._families_from_task(cfg['collection']), [])
+        with patch.object(ui.messagebox, 'showwarning') as warning, patch.object(ui, 'save_config') as save, \
+             patch.object(app, '_confirm_affix_mismatch', return_value=True), \
+             patch.object(ui, 'ask_continue_editing', return_value=True):
+            app._save_editor(name='empty-score.toml')
+        self.assertIn('评分族为空，测号文件不会产生任何输出！', warning.call_args.args[1])
+        self.assertEqual(save.call_args.args[1]['collection']['score_list'], '')
 
     # 已有族不重复追加；顺序统一按 FAMILIES 规范序，避免同一份配置因书写顺序不同
     # 而反复产生 diff。

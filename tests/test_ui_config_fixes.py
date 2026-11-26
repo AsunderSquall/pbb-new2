@@ -2,7 +2,7 @@
 
 覆盖 2026-10 的八条反馈里可以由纯逻辑验证的部分：
   * 区间测完后 `ranges[0].end == start` 仍可编辑/校验（反馈 2）；
-  * 名字里的换行/逗号必须被明确拒绝，而不是静默截断参数（反馈 3、6）；
+  * 名字里的换行必须被明确拒绝，英文逗号应当能作为名字的一部分；
   * 顺序模式下"三个前缀区间一样"应当收成全局区间，让全局终点/start/resume 生效（反馈 5）；
   * 界面设置里的启动默认配置（反馈 8）；
   * 三种格式保存后首尾空格不丢失（反馈 3）。
@@ -56,7 +56,7 @@ class RangeValidationTests(unittest.TestCase):
 
 
 class NameCharacterTests(unittest.TestCase):
-    """名字会原样进入不转义的参数协议与结果文件：坏字符必须明确拒绝。"""
+    """允许合法标点，拒绝会破坏结果文件行结构的字符。"""
 
     def assert_rejected(self, **overrides):
         with self.assertRaisesRegex(ConfigError, '不能包含'):
@@ -69,19 +69,12 @@ class NameCharacterTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, '换行'):
             _validate_config(cfg)
 
-    def test_comma_in_prefix_suffix_or_team_is_rejected(self):
+    def test_comma_in_prefix_suffix_and_team_is_allowed(self):
         cfg = base_config()
-        cfg['prefixes'] = [{'name': 'a,b'}]
-        with self.assertRaisesRegex(ConfigError, '逗号'):
-            _validate_config(cfg)
-        cfg = base_config()
-        cfg['suffixes'] = [{'name': 'a,b'}]
-        with self.assertRaisesRegex(ConfigError, '逗号'):
-            _validate_config(cfg)
-        cfg = base_config()
-        cfg['team_name'] = 'a,b'
-        with self.assertRaisesRegex(ConfigError, '逗号'):
-            _validate_config(cfg)
+        cfg['prefixes'] = [{'name': 'MerryChristmas,Mr.Lawrence'}]
+        cfg['suffixes'] = [{'name': '后,缀'}]
+        cfg['team_name'] = 'A,B'
+        _validate_config(cfg)
 
     def test_plain_spaces_are_still_allowed(self):
         cfg = base_config()

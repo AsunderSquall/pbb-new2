@@ -60,7 +60,7 @@ ENUMERATION_MODES = {
     "随机区间并配对前后缀": 4,
 }
 SCORE_MODES = {"全部评分后判断": "all", "任一达标即停止后续评分": "any"}
-COLLECT_MODES = {"不收集特殊号": 0, "收集预设阈值特殊号": 1, "收集自定义阈值特殊号": 2}
+COLLECT_MODES = {"不收集特殊号": 0, "收集预设阈值特殊号": 1}
 OUTPUT_SCORE_MODES = {"仅输出名字": 0, "输出名字和评分": 1}
 # 结果文件名模式 (对应 output.result_file 的三种写法, 见 main._resolve_result_file):
 #   "+" = 随机名 (result_<8位hex>.txt), "-" = 时间戳 (result_<YYYYMMDD_HHMMSS>.txt),
@@ -134,6 +134,9 @@ def blank_config() -> dict:
     if isinstance(defaults, dict):
         cfg.setdefault("collection", {}).update(
             {key: value for key, value in defaults.items() if isinstance(key, str)})
+        cfg['collection'].pop('special_thresholds', None)
+        if cfg['collection']['collect_mode'] == 2:
+            cfg['collection']['collect_mode'] = 0
 
     # team_name 必须非空（校验会拒绝空值），给一个占位名提醒用户去改
     cfg["team_name"] = "请填写队伍名"
@@ -155,10 +158,7 @@ def blank_config() -> dict:
 
 
 def _normalize_score_list(raw) -> list[str]:
-    """把 score_list 的原始写法归一成有序的族名列表（``rh`` → ``fs``、去重、丢弃无效项）。
-
-    空结果表示"全十族"的语义由调用方决定（编辑器会写成空串，排行榜会展开成全十族）。
-    """
+    """把 score_list 归一成有序的族名列表，处理别名、重复项和无效项。"""
     if isinstance(raw, (list, tuple)):
         raw = ",".join(str(item) for item in raw)
     result: list[str] = []
@@ -563,8 +563,7 @@ def _show_config_warnings(cfg, parent=None):
 
 
 # 单行输入里不该出现、而且肉眼完全看不见的字符。粘贴多行文本时 Tk 的 Entry 会把这些
-# 字符原样塞进 StringVar（界面上看不出来），它们再一路写进配置，最后在引擎的
-# `key=value` / 逗号分隔协议里把后面的前缀切走（见 main._check_name_text）。
+# 字符原样塞进 StringVar（界面上看不出来），落盘后会破坏结果文件的行结构。
 # 所以单行输入框一律"写入即清洗"：按回车或粘贴多行都直接丢掉换行。
 _INVISIBLE_CHARS = ('\r', '\n', '\t', '\0')
 
@@ -962,8 +961,13 @@ class ConfigSelector(tk.Toplevel):
         # 删掉的正好是主窗口当前配置时，回退到一个仍存在的配置，避免主窗口指向不存在的文件
         if os.path.abspath(self.monitor._config_path()) == os.path.abspath(path):
             remaining = self._config_files()
+            self.monitor._set_config_path(remaining[0] if remaining else "")
             if remaining:
-                self.monitor._set_config_path(remaining[0])
+                try:
+                    self.monitor._sync_config_controls(load_config(remaining[0]))
+                except Exception as exc:
+                    self.monitor._set_config_path("")
+                    messagebox.showwarning("请重新选择配置", str(exc), parent=self)
         self.monitor.status_var.set(f"已删除 {name}")
         self.refresh()
 
@@ -1431,7 +1435,7 @@ class Monitor(tk.Tk):
         self.score_views.clear()
         self.score_copy_buttons = {}
         if not families:
-            ttk.Label(self.score_area, text="选择配置后点击“开始”，这里会显示各评分族的第一名。", font=(UI_FONT, 12)).pack(anchor="center", pady=80)
+            ttk.Label(self.score_area, text="暂无评分族。可在配置的「评分」页选择评分族。", font=(UI_FONT, 12)).pack(anchor="center", pady=80)
             self._bind_wheel(self.score_canvas, self.score_area)
             return
         for index, family in enumerate(families):
@@ -2109,7 +2113,7 @@ class Monitor(tk.Tk):
         self.global_range_section.configure(
             text="全局区间（顺序模式：总控制器）" if is_sequential else "全局区间")
 
-    def _open_editor(self):
+    def _open_editor(self, draft_path=None):
         """打开配置编辑器窗口（同一个实例只开一个，重复点击只是置顶）。
 
         打开时先 load_config + _validate_config 并把结果深拷进 self.editor_cfg：
@@ -2127,9 +2131,11 @@ class Monitor(tk.Tk):
         self._pending_editor_cfg = None
         if pending is not None:
             cfg = copy.deepcopy(pending)
+            self._editor_save_path = None
         else:
             try:
-                cfg = load_config(self._config_path())
+                self._editor_save_path = self._config_path()
+                cfg = load_config(self._editor_save_path)
                 _validate_config(cfg)
             except Exception as exc:
                 messagebox.showerror("无法导入配置", str(exc), parent=self)
@@ -2160,7 +2166,7 @@ class Monitor(tk.Tk):
         # 文件名输入框 + 单个「保存」。原先的「导入 / 保存到当前文件 / 保存到 config.yaml /
         # 保存并启动」四个按钮已收敛：导入与编辑新配置都从配置选择器发起，
         # 保存目标由这个输入框决定（也是"另存为"的方式）。
-        self.editor_name_var = tk.StringVar(value=os.path.basename(self.config_var.get()))
+        self.editor_name_var = tk.StringVar(value=os.path.basename(draft_path or self.config_var.get()))
         ttk.Label(actions, text="文件名").pack(side="left", padx=(0, 6))
         ttk.Entry(actions, textvariable=self.editor_name_var, width=24).pack(side="left")
         ttk.Button(actions, text="保存", command=self._save_editor).pack(side="left", padx=(8, 0))
@@ -2417,7 +2423,10 @@ class Monitor(tk.Tk):
             self._switch_affix_view()
 
         collection = cfg.get("collection", {})
-        field(scores, 0, "评分族", "collection.score_list", collection.get("score_list", ""), width=45)
+        score_list = collection.get('score_list', '')
+        if isinstance(score_list, list):
+            score_list = ','.join(score_list)
+        field(scores, 0, "评分族", "collection.score_list", score_list, width=45)
         choice(scores, 1, "评分模式", "collection.score_mode", collection.get("score_mode", "all"), SCORE_MODES)
         choice(scores, 2, "收集模式", "collection.collect_mode", collection.get("collect_mode", 0), COLLECT_MODES)
         for index, family in enumerate(FAMILIES):
@@ -2642,6 +2651,7 @@ class Monitor(tk.Tk):
         self.editor_vars["collection.score_list"].set(cfg["collection"]["score_list"])
         cfg["collection"]["score_mode"] = self.editor_choice_maps["collection.score_mode"][self.editor_vars["collection.score_mode"].get()]
         cfg["collection"]["collect_mode"] = self.editor_choice_maps["collection.collect_mode"][self.editor_vars["collection.collect_mode"].get()]
+        cfg['collection'].pop('special_thresholds', None)
         # 结果文件：模式决定写 "+"/"-"，自定义模式写用户填的文件名。
         # 注意这里**不做** _resolve_result_file 展开 —— 展开发生在运行/保存时，
         # 这样配置文件里保留的是"+"/"-"这种意图，而不是某一次随机出来的具体文件名
@@ -2668,7 +2678,7 @@ class Monitor(tk.Tk):
         return cfg
 
     def _effective_score_list(self, cfg: dict) -> str:
-        """返回应该生效的 ``collection.score_list``：凡填了正阈值的族一律纳入。
+        """返回评分族列表；用户清空该栏时保留空值，否则补全有正阈值的族。
 
         **为什么要在界面层做这件事**：编辑器上每一族都有「最低 XX」输入框，用户在某族上
         填了非零阈值，意思就是"我要算这一族"。但校验规则要求「阈值 >0 ⇒ 该族必须在
@@ -2677,8 +2687,7 @@ class Monitor(tk.Tk):
         推给了用户，所以改由界面维护。
 
         规则：
-          - 用户已写的族名做归一（``rh`` → ``fs``、丢弃无法识别的项、去重），
-            空列表仍表示"全十族"；
+          - 用户已写的族名做归一（``rh`` → ``fs``、丢弃无法识别的项、去重）；
           - 再把「正阈值（``min_*`` 或 ``ptt_*``）却没在列表里的族」补进来；
           - 结果统一按 FAMILIES 的规范顺序排列 —— 与引擎的输出列序一致，便于阅读比对，
             也不影响计算（引擎本来就不看这串名字的顺序）；
@@ -2686,6 +2695,8 @@ class Monitor(tk.Tk):
         """
         collection = cfg.get("collection", {})
         normalized = _normalize_score_list(self.editor_vars["collection.score_list"].get())
+        if not normalized:
+            return ''
         for family in FAMILIES:
             thresholds = (collection.get(f"min_{family}", 0), collection.get(f"ptt_{family}", 0))
             if any(isinstance(value, int) and value > 0 for value in thresholds):
@@ -2713,6 +2724,10 @@ class Monitor(tk.Tk):
             var = self.editor_vars.get(config_key)
             if var is None:
                 continue
+            if key == 'collect_mode' and value == 2:
+                value = 0
+            if key == 'score_list' and isinstance(value, list):
+                value = ','.join(map(str, value))
             options = self.editor_choice_maps.get(config_key)
             if options is not None:
                 # 下拉框（评分模式/收集模式）里存的是**显示文案**，不能直接塞原值：
@@ -2769,7 +2784,8 @@ class Monitor(tk.Tk):
         """
         try:
             cfg = self._editor_config()
-            _show_config_warnings(cfg, self.editor)
+            if not start:
+                _show_config_warnings(cfg, self.editor)
             _validate_config(cfg)
             if not self._confirm_affix_mismatch(cfg):
                 return
@@ -2782,11 +2798,17 @@ class Monitor(tk.Tk):
             if not os.path.splitext(raw)[1]:
                 raw += ".toml"
             target = os.path.join(CONFIG_DIR, raw)
+            previous = getattr(self, '_editor_save_path', None)
+            same_file = previous is not None and os.path.normcase(os.path.abspath(previous)) == os.path.normcase(os.path.abspath(target))
+            if os.path.exists(target) and not same_file:
+                if not messagebox.askyesno('确认覆盖配置', f'「{raw}」已存在，是否覆盖？', parent=self.editor):
+                    return
             save_config(target, cfg)
         except Exception as exc:
             messagebox.showerror("无法保存配置", str(exc), parent=self.editor)
             return
         self._set_config_path(target)
+        self._editor_save_path = target
         self.editor_name_var.set(os.path.basename(target))
         self.editor_cfg = cfg
         self._sync_config_controls(cfg)
@@ -2801,18 +2823,19 @@ class Monitor(tk.Tk):
             if not ask_continue_editing(self.editor, os.path.basename(target)):
                 self._close_editor()
 
-    def _confirm_affix_mismatch(self, cfg):
+    def _confirm_affix_mismatch(self, cfg, *, start=False):
         if cfg.get("enumeration", {}).get("mode") != 4:
             return True
-        np = len(cfg.get("prefixes", []))
-        ns = len(cfg.get("suffixes", []))
+        np = len(cfg.get("prefixes", ['+']))
+        ns = len(cfg.get("suffixes", ['+']))
         if np == ns:
             return True
         detail = "后缀不足，将按下标取模循环使用后缀。" if ns < np else "后缀多于前缀，多出的后缀不会参与配对。"
+        action = '启动' if start else '保存'
         return messagebox.askyesno(
             "一一对应：前后缀数量不匹配",
-            f"前缀 {np} 条，后缀 {ns} 条。\n配对以 {np} 条前缀为准。\n{detail}\n\n仍要继续保存吗？",
-            parent=self.editor,
+            f"前缀 {np} 条，后缀 {ns} 条。\n配对以 {np} 条前缀为准。\n{detail}\n\n仍要继续{action}吗？",
+            parent=self if start else self.editor,
         )
 
     def _config_path(self) -> str:
@@ -2954,12 +2977,19 @@ class Monitor(tk.Tk):
         # processed==0 直接退出；其它模式没有检查点，0 处理量意味着没东西可推进。
         if not origin or not path or (processed <= 0 and 'format' not in origin):
             return
+        enumeration = origin['enumeration']
+        if enumeration.get('mode') != 1 and enumeration.get('prefix_ranges'):
+            return
         try:
             cfg = copy.deepcopy(origin)
             expected = getattr(self, '_run_last_saved_config', None)
             if isinstance(expected, dict) and load_config(path) != expected:
                 raise ValueError('配置在运行中被修改，保留磁盘配置，请使用 Resume 恢复检查点')
-            ranges = cfg.get("enumeration", {}).get("ranges") or []
+            if isinstance(expected, dict):
+                disk_cfg = copy.deepcopy(expected)
+            else:
+                disk_cfg = cfg
+            ranges = disk_cfg.get("enumeration", {}).get("ranges") or []
             if not ranges:
                 return
             advanced = None
@@ -2969,20 +2999,26 @@ class Monitor(tk.Tk):
                 resumed = _try_resume(cfg, result_file, out_dir=RESULT_ROOT)
                 if resumed is not None:
                     advanced = int(resumed[0]["enumeration"]["ranges"][0].get("start", 0) or 0)
+            if advanced is None and 'format' in cfg:
+                return
             if advanced is None:
                 advanced = self._run_effective_start + processed
             end = ranges[0].get("end", -1)
             if end not in (-1, None):
                 advanced = min(advanced, int(end))
-            ranges[0]["start"] = max(0, int(advanced))
-            save_config(path, cfg)
-            self._run_last_saved_config = copy.deepcopy(cfg)
+            if advanced <= ranges[0].get("start", 0):
+                return
+            ranges[0]["start"] = int(advanced)
+            save_config(path, disk_cfg)
+            self._run_last_saved_config = copy.deepcopy(disk_cfg)
+            self._run_progress_warning = None
             if final:
                 self._run_start_updated = True
             self.status_var.set(f"已更新 {os.path.basename(path)} 的全局 start（→{ranges[0]['start']}）")
         except Exception as exc:
             # 回写失败不能影响停止流程，只在状态栏提示
-            self.status_var.set(f"更新 start 失败：{exc}")
+            self._run_progress_warning = f"更新 start 失败：{exc}"
+            self.status_var.set(self._run_progress_warning)
 
     def _save_session_progress(self):
         """Session query may be cancelled: save without finalizing this run."""
@@ -3002,6 +3038,9 @@ class Monitor(tk.Tk):
 
     def _open_editor_for(self, path: str):
         """打开编辑器并载入指定配置文件（供配置选择器调用）。"""
+        if self._pending_editor_cfg is not None:
+            self._open_editor(draft_path=path)
+            return
         self._set_config_path(path)
         self._open_editor()
 
@@ -3044,12 +3083,13 @@ class Monitor(tk.Tk):
         try:
             end = int(raw)
         except (TypeError, ValueError):
-            return
+            raise ValueError('预计总量必须为整数，-1 表示全部') from None
         en = cfg.setdefault("enumeration", {})
         ranges = en.get("ranges") or [{"start": 0, "end": -1}]
         en["ranges"] = ranges
+        if end != -1 and not ranges[0].get("start", 0) <= end < 2**64:
+            raise ValueError('预计总量必须在已测数量到 2^64-1 之间，或填 -1')
         ranges[0]["end"] = end
-        self.status_var.set("各前缀区间不同：本次按 prefix_ranges 逐前缀跑，预计总量这一格不生效")
 
     # 启动线程低于「自动值 × 这个比例」时先问一句（见 _confirm_thread_count）。
     LOW_THREAD_RATIO = 0.75
@@ -3068,8 +3108,11 @@ class Monitor(tk.Tk):
             requested = int(str(self.threads_var.get()).strip() or -1)
         except (TypeError, ValueError):
             return True                      # 非法值留给 _start 里的范围校验报错
+        try:
+            effective = resolve_threads(requested)
+        except ValueError:
+            return True
         auto = available_threads()
-        effective = resolve_threads(requested)
         if auto <= 0 or effective >= auto * self.LOW_THREAD_RATIO:
             return True
         percent = effective * 100 // max(1, auto)
@@ -3089,31 +3132,36 @@ class Monitor(tk.Tk):
         """
         if self.running:
             return
-        # 线程数明显低于自动值时先确认，避免"以为在省电、实际白跑一倍时间"。
-        if not self._confirm_thread_count():
-            self.status_var.set("已取消启动：启动线程低于总线程数的 75%")
-            return
         resume = self.resume_var.get()
         rebuild = self.rebuild_var.get()
         try:
+            requested_threads = resolve_threads(int(self.threads_var.get()))
+            if not self._confirm_thread_count():
+                self.status_var.set("已取消启动：启动线程低于总线程数的 75%")
+                return
             config_path = self._config_path()
+            if not config_path:
+                raise ValueError('请先选择或新建配置文件。')
             cfg = load_config(config_path)
             self._run_last_saved_config = copy.deepcopy(cfg)
             _show_config_warnings(cfg, self)
             _validate_config(cfg)
             self._apply_range_end(cfg)
+            if not self._confirm_affix_mismatch(cfg, start=True):
+                self.status_var.set("已取消启动")
+                return
             self._run_result_file = _resolve_result_file(self._selected_result_file())
             # 格式顺序任务使用连续完成检查点；旧配置保留命中反推语义。
             if resume:
+                if cfg['enumeration']['mode'] != 1:
+                    raise ValueError('续测仅支持顺序枚举，请切换枚举模式或取消勾选续测。')
                 from .main import _try_resume
                 resumed = _try_resume(cfg, self._run_result_file, out_dir=RESULT_ROOT)
                 if resumed is not None:
                     cfg = resumed[0]
-                    # resume 的语义是「先把全局 start 改到读到的位置，再从 start 开跑」：
-                    # 这里把新 start 落盘，本次即使中途退出，下次也从新位置继续，与
-                    # 「自动更新 start」同一口径（都只动全局 start）。
-                    save_config(config_path, cfg)
-                    self._run_last_saved_config = copy.deepcopy(cfg)
+                    _validate_config(cfg)
+                else:
+                    messagebox.showwarning('续测提示', '没有找到可用的续测位置，将从配置中的已测数量开始。', parent=self)
             # 记下本次运行的基准：起步时的 config 快照 + **实际**起步位置。
             # 续测生效时 cfg 已被改写，所以这行必须放在续测之后。
             # 结束/停止/关窗时按「续测起点 + 本次处理量」回写，见 _advance_config_start。
@@ -3122,13 +3170,12 @@ class Monitor(tk.Tk):
             self._run_effective_start = int(
                 ((cfg.get("enumeration", {}).get("ranges") or [{}])[0]).get("start", 0) or 0)
             self._run_processed = 0
+            self._run_progress_warning = None
             # 每测 0.01T 就把 start 往前推一次（见 autostart）：首个阈值从 0.01T 起算。
             self._start_advance_mark = autostart.STEP
             self._run_start_updated = False
             task = _build_task_config(copy.deepcopy(cfg))
-            task["n_threads"] = int(self.threads_var.get())
-            if not 1 <= task["n_threads"] <= 256:
-                raise ValueError("启动线程必须在 1 到 256 之间")
+            task["n_threads"] = requested_threads
             range_end = int(self.range_var.get())
             # 界面上的 -1 表示「无上界」：转成 u64 上限，而不是一个有限任务。
             task["range_R"] = 2**64 - 1 if range_end == -1 else range_end
@@ -3141,6 +3188,7 @@ class Monitor(tk.Tk):
             self.boards = {family: [] for family in self.families}
             self.expanded_families.clear()
             self._render_score_boxes(self.families)
+            self._write_runtime_threads(requested_threads)
         except Exception as exc:
             messagebox.showerror("无法启动", str(exc))
             return
@@ -3156,7 +3204,6 @@ class Monitor(tk.Tk):
         self.rebuild_checkbutton.configure(state="disabled")
         # 运行中锁住本次的保存策略，多族顺序任务还会定期回写安全检查点。
         self.auto_start_checkbutton.configure(state="disabled")
-        self._write_runtime_threads(self.runtime_thread_limit)
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.status_var.set("正在构建并启动普通引擎...")
@@ -3216,15 +3263,33 @@ class Monitor(tk.Tk):
                 self.proc.terminate()
             self.events.put(("status", "普通引擎正在运行"))
             assert self.proc.stdin is not None
-            self.proc.stdin.write(params)
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.write(params)
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
             assert self.proc.stderr is not None
+            diagnostic = None
             for line in self.proc.stderr:
-                self.events.put(("line", line.strip()))
+                line = line.strip()
+                if line.startswith("[engine] ERROR:"):
+                    diagnostic = line
+                if line.startswith("[engine] WARNING:"):
+                    self.events.put(("warning", line))
+                self.events.put(("line", line))
             code = self.proc.wait()
-            self.events.put(("finished", "已停止" if code else "已完成"))
+            if code and not self.stop_requested:
+                detail = f"引擎异常退出（代码 {code}）。"
+                if diagnostic:
+                    detail += f"\n{diagnostic}"
+                self.events.put(("error", detail))
+            else:
+                self.events.put(("finished", "已停止" if self.stop_requested else "已完成"))
         except BaseException as exc:
-            self.events.put(("error", str(exc) or "普通引擎构建或启动失败"))
+            if self.stop_requested:
+                self.events.put(("finished", "已停止"))
+            else:
+                self.events.put(("error", str(exc) or "普通引擎构建或启动失败"))
 
     @staticmethod
     def _thread_control_path() -> str:
@@ -3307,16 +3372,9 @@ class Monitor(tk.Tk):
     def _families_from_task(task: dict) -> list[str]:
         """把 task 的 score_list 归一成 UI 排行榜要显示的族列表。
 
-        空列表表示「全部十族」（与引擎语义一致）；`rh` 是 `fs` 的别名，先去别名再去重，
-        顺序按配置文件里的书写顺序，仅影响排行榜面板的排列，不影响引擎输出列序。
+        按配置里的书写顺序排列面板；留空时没有评分面板。
         """
-        raw = task.get("score_list", "")
-        if isinstance(raw, (list, tuple)):
-            raw = ",".join(raw)
-        chosen = [part.strip().lower() for part in str(raw).split(",") if part.strip()]
-        if not chosen:
-            return list(FAMILIES)
-        return _normalize_score_list(raw)
+        return _normalize_score_list(task.get('score_list', ''))
 
     def _drain_events(self):
         """主线程侧的队列消费者：把工作线程的消息刷成界面更新。
@@ -3337,8 +3395,10 @@ class Monitor(tk.Tk):
                 self.status_var.set(value)
             elif kind == "finished":
                 self._set_finished(value)
+            elif kind == "warning":
+                messagebox.showwarning("引擎提示", value)
             elif kind == "error":
-                self._set_finished("启动失败")
+                self._set_finished("引擎错误")
                 messagebox.showerror("引擎错误", value)
         if self.boards_dirty and time.monotonic() - self.last_board_refresh >= 0.15:
             self._refresh_boards()
@@ -3358,6 +3418,11 @@ class Monitor(tk.Tk):
         解码失败就丢弃该行而不是让整块榜单失败。
         其余进度字段用模块级正则从引擎日志里提取，引擎日志格式才是唯一契约。
         """
+        if line.startswith("SUMMARY "):
+            summary = dict(field.split('=', 1) for field in line.split()[1:] if '=' in field)
+            if summary.get('contiguous', '').isdigit():
+                self._run_processed = int(summary['contiguous'])
+            return
         if line == "UI_TOP_BEGIN":
             self._incoming_boards = {family: [] for family in self.families}
             return
@@ -3385,10 +3450,9 @@ class Monitor(tk.Tk):
             self.stat_vars["count"].set(f"{match.group(1)}T")
             # 记下本次会话已处理的候选数（引擎按「已完成 task × CHUNK_SIZE」累计），
             # 供结束时推进配置里的 start（见 _advance_config_start）。
-            try:
-                self._run_processed = int(round(float(match.group(1)) * 1e12))
-            except (TypeError, ValueError):
-                pass
+            processed = autostart.processed_from_line(line)
+            if processed is not None:
+                self._run_processed = processed
             # 每跨过 0.01T 就落一次盘：完全由引擎这条进度行驱动，不轮询、不占线程。
             if self._run_processed >= getattr(self, "_start_advance_mark", autostart.STEP):
                 self._start_advance_mark = (
@@ -3443,7 +3507,7 @@ class Monitor(tk.Tk):
         self.status_var.set("正在停止引擎..." if self.proc else "正在取消启动...")
         # 先按当前进度推进配置里的 start：不能只等 _set_finished —— 强杀路径下工作线程
         # 可能来不及收尾，而用户点「停止」的语义就是"到此为止，记下位置"。
-        self._advance_config_start()
+        self._advance_config_start(final=False)
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             self._schedule_after(1500, self._force_stop, self.proc)
@@ -3470,7 +3534,8 @@ class Monitor(tk.Tk):
         self.auto_start_checkbutton.configure(state="normal")
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
-        self.status_var.set(status)
+        warning = getattr(self, '_run_progress_warning', None)
+        self.status_var.set(f'{status}。{warning}' if warning else status)
 
     def _schedule_after(self, delay_ms: int, callback, *args) -> str:
         """``after`` 的记账版本：记录 id，便于关闭时统一取消。
