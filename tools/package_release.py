@@ -242,7 +242,7 @@ def source_paths():
         "tests/test_config_location.py", "tests/test_docstring_coverage.py",
         "tests/test_ui_affixes.py", "tests/test_ui_drag.py", "tests/test_ui_engine.py", "tests/test_flex.py",
         "tests/test_qp_filter.py", "tests/native_qp_filter.cpp", "tests/test_threading_config.py",
-        "tests/test_ui_start.py",
+        "tests/test_ui_start.py", "tests/test_input_edges.py",
         "tests/test_distribution_configs.py",
         "tests/test_progress_safety.py",
         # 2026-10 批次新增：界面配置修复 + 顺序模式全局区间 + 自动更新 start
