@@ -3,4 +3,11 @@
 // 例如 PBB_SRC_DIR=v1_baseline → -I src/v1_baseline -I src
 // include "engine.hpp" 会优先找到 v1_baseline 版本
 #include "engine.hpp"
-int main(int argc, char** argv) { return engine_main(argc, argv); }
+int main(int argc, char** argv) {
+    try {
+        return engine_main(argc, argv);
+    } catch (const std::exception& exc) {
+        fprintf(stderr, "[engine] ERROR: invalid parameters or startup failure: %s\n", exc.what());
+        return 1;
+    }
+}

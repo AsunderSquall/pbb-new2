@@ -25,8 +25,7 @@ def config():
     cfg['enumeration']['mode'] = 1
     cfg['enumeration']['ranges'] = [{'start': 0, 'end': 100000}]
     cfg['threads']['worker_threads'] = 2
-    cfg['collection'].update(score_list='qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj', collect_mode=2,
-                             special_thresholds={'eight_v_min': 0})
+    cfg['collection'].update(score_list='qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj', collect_mode=1)
     for family in ('qp', 'qd', 'pp', 'pd', 'cqd', 'cp', 'fp', 'wc', 'fs', 'pj'):
         cfg['collection']['min_'+family] = 1
     cfg['output'].update(output_xp=1, log_output=0, speed_output=0)

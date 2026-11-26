@@ -21,16 +21,20 @@ STEP = 10 ** 10
 
 # 引擎的进度行：`task12 finished,task_mex=5,count:0.001200T`
 COUNT_RE = re.compile(r"count:([0-9.]+)T")
+CONTIGUOUS_RE = re.compile(r'\bcontiguous=(\d+)')
 
 
 def processed_from_line(line: str):
     """从引擎的一行进度里取出「已处理候选数」（不是 0.01T 阈值判断，只是解析）。"""
+    exact = CONTIGUOUS_RE.search(line or '')
+    if exact:
+        return int(exact.group(1))
     match = COUNT_RE.search(line or "")
     if not match:
         return None
     try:
         return int(round(float(match.group(1)) * 1e12))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -43,7 +47,7 @@ class StartUpdater:
     - 写盘失败只记录一次 ``error``，不影响测号本身。
     """
 
-    def __init__(self, config_path, cfg, enabled: bool = True, notify=None):
+    def __init__(self, config_path, cfg, enabled: bool = True, notify=None, *, original_config=None):
         self.config_path = config_path
         self.enabled = bool(enabled) and config_path is not None
         self.notify = notify or (lambda message: None)
@@ -54,13 +58,16 @@ class StartUpdater:
         self.written = None
         self.error = None
         self.stopped = False
-        self._last_saved = copy.deepcopy(self.origin)
+        self._last_saved = copy.deepcopy(self.origin if original_config is None else original_config)
         ranges = (self.origin.get('enumeration') or {}).get('ranges') or []
         if ranges:
             self.base = int(ranges[0].get('start', 0) or 0)
         try:
-            from . import sequential
-            _start, self.end = sequential.global_bounds(self.origin)
+            if self.origin['enumeration']['mode'] == 1:
+                from . import sequential
+                _start, self.end = sequential.global_bounds(self.origin)
+            elif ranges and ranges[0].get('end', -1) >= 0:
+                self.end = ranges[0]['end']
         except Exception:
             self.end = None
 
@@ -98,15 +105,22 @@ class StartUpdater:
 
     def _write(self, processed: int):
         try:
-            if self.written is not None and load_config(self.config_path) != self._last_saved:
+            if load_config(self.config_path) != self._last_saved:
                 self.stopped = True
                 self.notify('配置在测号期间被修改，已停止回写 start')
                 return None
-            cfg = copy.deepcopy(self.origin)
+            cfg = copy.deepcopy(self._last_saved)
             ranges = cfg.setdefault('enumeration', {}).setdefault('ranges', [{}])
             if not ranges:
                 ranges.append({})
-            ranges[0] = dict(ranges[0] or {}, start=self._target(processed))
+            target = self._target(processed)
+            end = ranges[0].get('end', -1)
+            if end >= 0:
+                target = min(target, end)
+            start = ranges[0].get('start', 0)
+            if target <= start:
+                return None
+            ranges[0] = dict(ranges[0], start=target)
             save_config(self.config_path, cfg)
             self._last_saved = copy.deepcopy(cfg)
             self.written = ranges[0]['start']

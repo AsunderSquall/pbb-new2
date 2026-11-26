@@ -72,6 +72,9 @@ static std::string hex_decode(const std::string& h){std::string o;for(size_t i=0
 // CSV 分割 (prefixes/suffixes 列表)
 static std::vector<std::string> split_csv(const std::string& s){std::vector<std::string> v;if(s.empty()){v.push_back("");return v;}std::string cur;for(char c:s){if(c==','){v.push_back(cur);cur.clear();}else cur+=c;}v.push_back(cur);return v;}
 
+#include "affix_params.hpp"
+#include "radix_range.hpp"
+
 // ===== 引擎入口 =====
 inline int engine_main(int argc,char**argv){
     (void)argc;(void)argv;
@@ -88,10 +91,31 @@ inline int engine_main(int argc,char**argv){
     std::string team=kv["team_name"];int n_threads=std::stoi(kv["n_threads"]);
     int scl=std::stoi(kv["scl"]),clen=std::stoi(kv["charset_len"]);
     std::string cbytes=hex_decode(kv["charset_bytes"]);
-    auto prefixes=split_csv(kv["prefixes"]),suffixes=split_csv(kv["suffixes"]);
+    std::vector<std::string> prefixes, suffixes;
+    if (!read_affix_param(kv, "prefixes", prefixes) || !read_affix_param(kv, "suffixes", suffixes))
+        return 1;
     int np=(int)prefixes.size(),ns=(int)suffixes.size();
     int mode=std::stoi(kv["mode"]),vlen=std::stoi(kv["variable_len"]);
     uint64_t rL=std::stoull(kv["range_L"]),rR=std::stoull(kv["range_R"]);
+    if (scl < 1 || scl > 64 || clen < 1 || cbytes.size() != size_t(scl) * clen) {
+        fprintf(stderr,"[engine] ERROR: empty or incomplete character set\n");
+        return 1;
+    }
+    if (mode < 1 || mode > 4 || n_threads < 1 || n_threads > 256 || vlen < 1 || rL > rR) {
+        fprintf(stderr,"[engine] ERROR: invalid mode, thread count, variable length, or range\n");
+        return 1;
+    }
+
+    const auto longest_affix = [](const auto& names) {
+        size_t longest = 0;
+        for (const auto& name : names) longest = std::max(longest, name.size());
+        return longest;
+    };
+    if (longest_affix(prefixes) + size_t(vlen) * scl + longest_affix(suffixes) >= 512) {
+        fprintf(stderr,"[engine] ERROR: name exceeds engine buffer\n");
+        return 1;
+    }
+
     // 逐族评分阈值 (MNAME 序): min_qp/min_qd/min_pp/min_pd/min_cqd/min_cp/min_fp/min_wc/min_fs/min_pj
     // <=0 视为该族不参与门控。
     static const char* kMinKey[M_N]={"min_qp","min_qd","min_pp","min_pd","min_cqd",
@@ -106,7 +130,7 @@ inline int engine_main(int argc,char**argv){
     for(int m=0;m<M_N;m++)ptt_[m]=(kPttKey[m][0]&&kv.count(kPttKey[m]))?std::stoi(kv[kPttKey[m]]):0;
 
     // ---- 评分计划 (score_list + score_mode) ----
-    // score_list: 逗号分隔的族名, 声明要计算哪些评分 (空 ⇒ 全 10 族, 按 MNAME 序)。
+    // score_list: 逗号分隔的评分族名，留空时不写普通结果。
     //   支持的 token: qp qd pp pd cqd cp fp wc fs pj; 别名 rh = fs (人海)。
     //   未列出的族完全不计算 (sc 恒为 0), 从而真正省下对应点积/特征构造。
     // score_mode: all = 全部算完; any = 按 list 顺序算, 遇首个 (min_>0 且 sc>=min_)
@@ -130,19 +154,14 @@ inline int engine_main(int argc,char**argv){
                 if(!hit)fprintf(stderr,"[engine] WARN: unknown score token '%s' ignored\n",t.c_str());
             }
         }
-        if(plan.norder==0)for(int m=0;m<M_N;m++){plan.comp[m]=true;plan.order[plan.norder++]=m;}
+        if (plan.norder == 0)
+            fprintf(stderr, "[engine] WARN: 评分族为空，测号文件不会产生任何输出！\n");
         for(int m=0;m<M_N;m++)plan.minv[m]=min_[m];
         for(int m=0;m<M_N;m++)plan.pttv[m]=ptt_[m];
         std::string sm=kv.count("score_mode")?kv["score_mode"]:"all";
         plan.any_mode=(sm=="any");
     }
-    int collect_mode=kv.count("collect_mode")?std::stoi(kv["collect_mode"]):0;  // 0=否, 1=硬编码阈值, 2=自定义阈值
-    // collect_mode=2: 自定义阈值 (对齐原版 special_thresholds)
-    int c_8v=0,c_7v=0,c_hl=0,c_hp=0;
-    if(collect_mode==2){
-        c_8v=std::stoi(kv["c_eight_v_min"]);c_7v=std::stoi(kv["c_seven_v_min"]);
-        c_hl=std::stoi(kv["c_hl_min"]);c_hp=std::stoi(kv["c_hp398_min"]);
-    }
+    const bool collect_blue = kv.count("collect_mode") && kv["collect_mode"] == "1";
     int output_xp=kv.count("output_xp")?std::stoi(kv["output_xp"]):1;
     int output_log=kv.count("output_log")?std::stoi(kv["output_log"]):1;
     int output_speed=kv.count("output_speed")?std::stoi(kv["output_speed"]):1;
@@ -155,19 +174,49 @@ inline int engine_main(int argc,char**argv){
     if(kv.count("prefix_range_L") && kv.count("prefix_range_R")){
         auto parts_L = split_csv(kv["prefix_range_L"]);
         auto parts_R = split_csv(kv["prefix_range_R"]);
+        if (parts_L.size() != size_t(np) || parts_R.size() != size_t(np)) {
+            fprintf(stderr,"[engine] ERROR: prefix range count does not match prefixes\n");
+            return 1;
+        }
         for(size_t i=0;i<parts_L.size()&&i<parts_R.size();i++){
             prefix_L.push_back(std::stoull(parts_L[i]));
             prefix_R.push_back(std::stoull(parts_R[i]));
+            if (prefix_L.back() > prefix_R.back()) {
+                fprintf(stderr,"[engine] ERROR: prefix range end is before start\n");
+                return 1;
+            }
         }
         has_prefix_ranges = !prefix_L.empty();
+    }
+
+    if (mode == 1) {
+        uint64_t total = 1;
+        for (int i=0;i<vlen;i++) {
+            if (total > UINT64_MAX / uint64_t(clen)) {
+                total = UINT64_MAX;
+                break;
+            }
+            total *= clen;
+        }
+        rR = std::min(rR,total);
+        rL = std::min(rL,rR);
+        for (size_t i=0;i<prefix_R.size();i++) {
+            prefix_R[i]=std::min(prefix_R[i],total);
+            prefix_L[i]=std::min(prefix_L[i],prefix_R[i]);
+        }
     }
 
     // 打开输出文件
     std::string out_path="out/"+kv["result_file"];
     FILE*fp=fopen(out_path.c_str(),"a");if(!fp){fprintf(stderr,"[engine] ERROR: cannot open %s\n",out_path.c_str());return 1;}
-    FILE*fp_blue=nullptr;if(collect_mode>=1)fp_blue=fopen("out/blue.txt","a");  // mode 1/2 均收集
+    FILE*fp_blue = collect_blue ? fopen("out/blue.txt", "a") : nullptr;
     FILE*flog=output_log?stderr:fopen("out/task_log.txt","a");
     FILE*fspeed=output_speed?stderr:fopen("out/speed_log.txt","a");
+    if (!flog || !fspeed || (collect_blue && !fp_blue)) {
+        const char* failed = !flog ? "task_log.txt" : !fspeed ? "speed_log.txt" : "blue.txt";
+        fprintf(stderr,"[engine] ERROR: cannot open out/%s\n",failed);
+        return 1;
+    }
     fprintf(flog,"[engine] SIMD: %s\n",PBB_SIMD_NAME);fflush(flog);
     DBG("files opened, n_threads=%d mode=%d range=[%llu,%llu)",
         n_threads,mode,(unsigned long long)rL,(unsigned long long)rR);
@@ -215,7 +264,7 @@ inline int engine_main(int argc,char**argv){
 
     // mode=2/3/4 预处理
     int varlen_task=vlen;uint64_t random_range_max=1;
-    if(mode>=2){varlen_task=0;uint64_t x=1;while(x<CHUNK_SIZE){varlen_task++;x*=clen;}if(varlen_task>vlen)varlen_task=vlen;random_range_max=x;}
+    if(mode>=2){varlen_task=0;uint64_t x=1;while(clen > 1 && x < CHUNK_SIZE){varlen_task++;x*=clen;}if(varlen_task>vlen)varlen_task=vlen;random_range_max=x;}
 
     // 预分配 mex_vis (预计 task 数, 留 20% 余量)
     // mode 1 (无 per-prefix ranges): 每个 prefix 跑完整区间 → 总 task = range_chunks × np
@@ -247,8 +296,8 @@ inline int engine_main(int argc,char**argv){
         if(has_prefix_ranges){
             for(int j=0;j<np;j++){
                 uint64_t pl=prefix_L[j], pr=prefix_R[j];
-                for(uint64_t i=pl;i<pr;i+=CHUNK_SIZE){
-                    uint64_t tr=i+CHUNK_SIZE;if(tr>pr)tr=pr;
+                for(uint64_t i=pl;i<pr;i=chunk_end(i,pr,CHUNK_SIZE)){
+                    uint64_t tr=chunk_end(i,pr,CHUNK_SIZE);
                     TaskData t;t.L=i;t.R=tr;t.type=mode;
                     t.prefix_id=j+1;
                     t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
@@ -259,12 +308,12 @@ inline int engine_main(int argc,char**argv){
                 }
             }
         } else {
-            if(mode==1)for(int j=0;j<np;j++)for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
-                uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
+            if(mode==1)for(int j=0;j<np;j++)for(uint64_t i=rL;i<rR;i=chunk_end(i,rR,CHUNK_SIZE)){
+                uint64_t tr=chunk_end(i,rR,CHUNK_SIZE);
                 TaskData t;t.L=i;t.R=tr;t.type=1;t.prefix_id=j+1;t.suffix_id=(j%ns)+1;
                 t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);q_add(q,t);}
-            else for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
-                uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
+            else for(uint64_t i=rL;i<rR;i=chunk_end(i,rR,CHUNK_SIZE)){
+                uint64_t tr=chunk_end(i,rR,CHUNK_SIZE);
                 TaskData t;t.L=i;t.R=tr;t.type=mode;
                 t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
                 std::mt19937_64 prng(t.chunk_seed);
@@ -299,7 +348,7 @@ inline int engine_main(int argc,char**argv){
         #define ENC(dst,ci) do{const char*_s=cb+(ci)*scl;if(scl==4)memcpy((dst),_s,4);else if(scl==1)*(dst)=*_s;else if(scl==2)memcpy((dst),_s,2);else if(scl==3)memcpy((dst),_s,3);else memcpy((dst),_s,scl);}while(0)
 
         // ---- 公共 helper: 评分 + blue 判定 (四种模式共享, 消除重复) ----
-        // 逐族阈值门控: 任一参与族 (min_[m]>0) 达标即输出; 无参与族时保留全部过初筛候选。
+        // 有评分族但未设阈值时，保留全部过初筛候选。空计划不写普通结果。
         auto process_one=[&](const char* buf,int nlen,const ScoreResult& r){
             if(!r.flag)return;
             const int* sc=r.sc;
@@ -312,18 +361,22 @@ inline int engine_main(int argc,char**argv){
                     if(min_[m]>0&&sc[m]>=min_[m]){keep=true;break;}          // 普通阈值已过
                     if(ptt_[m]>0&&r.sc_max[m]>=ptt_[m]){keep=true;break;}    // 普通未过 → 查 ptt(score_max)
                 }}
-            if(keep){std::lock_guard lk(out_mtx);local_found++;
+            if(plan.norder > 0 && keep){std::lock_guard lk(out_mtx);local_found++;
                 if(output_xp){fprintf(fp,"%.*s@%s",nlen,buf,team.c_str());
                     for(int m=0;m<M_N;m++)if(plan.comp[m])fprintf(fp," %d",sc[m]);
                     fputc('\n',fp);}
                 else fprintf(fp,"%.*s@%s\n",nlen,buf,team.c_str());
                 fflush(fp);}
             // props[7] 已是原始 HP (154..406, 无 +36 偏移); props[0..6] 含 +36 偏移。
-            // 对齐原版 pbb_old.cpp 的 blue 判据 (sum*3-prop[7] / sum-prop[7]/3 / prop[7]==398)。
-            if(collect_mode>=1&&fp_blue){int sum=r.sum,hp=r.props[7],hl=*std::min_element(r.props,r.props+7);bool blue=false;
-                if(collect_mode==1){if(sum>=777||(sum*3-hp)>=2000||(hp==398&&sum>=741)||(hl>=93))blue=true;}
-                else{if(sum>=c_8v||(sum-hp/3)>=c_7v||(hp==398&&sum>=c_hp)||(hl>=c_hl))blue=true;}
-                if(blue){std::lock_guard lk(out_mtx);fprintf(fp_blue,"%.*s@%s\n",nlen,buf,team.c_str());fflush(fp_blue);}}
+            if (fp_blue) {
+                const int sum = r.sum, hp = r.props[7];
+                const int hl = *std::min_element(r.props, r.props + 7);
+                if (sum >= 777 || sum * 3 - hp >= 2000 || (hp == 398 && sum >= 741) || hl >= 93) {
+                    std::lock_guard lk(out_mtx);
+                    fprintf(fp_blue, "%.*s@%s\n", nlen, buf, team.c_str());
+                    fflush(fp_blue);
+                }
+            }
         };
 
         // ---- 编码 helper: 顺序进位 (mode 1/2/4 共用) ----
@@ -343,12 +396,10 @@ inline int engine_main(int argc,char**argv){
         // ---- mode 1: 固定批宽候选交错 KSA，持久 digits/carry 生成连续候选 ----
         auto consume_mode1=[&](char* buf,int nlen,Name& name,int plen,int vlen,uint64_t L,uint64_t R){
 #if PBB_HAS_SIMD
-            // 取模法计算 up: 找到 L 和 R-1 最高的共同 clen 进制位
-            int up=0;{uint64_t dl=L,dr=R-1,div=1;for(int d=0;d<vlen;d++)div*=clen;
-                while(up<vlen){div/=clen;if(dl/div!=dr/div)break;dl%=div;dr%=div;up++;}}
+            const int up = common_radix_prefix(L, R - 1, clen, vlen);
             int epre=plen+up*scl;
             // 初始化第一个候选的 digits (仅需要 advance_buf 使用)
-            int digits[16];uint64_t now=L;
+            int digits[512];uint64_t now=L;  // 容量与名字缓冲区一致。
             for(int d=vlen-1;d>=0;d--){digits[d]=(int)(now%clen);now/=clen;ENC(buf+plen+d*scl,digits[d]);}
             names[0].PRELEN=epre;names[0].load_prefix(buf,nlen);
             for(int lane=1;lane<BATCH_WIDTH;lane++){
@@ -416,11 +467,8 @@ inline int engine_main(int argc,char**argv){
                 if(i+1<R)advance_buf();
             }
 #else
-            uint8_t dl[16],dr[16];uint64_t now;
-            now=L;for(int d=vlen-1;d>=0;d--){dl[d]=now%clen;now/=clen;}
-            now=R-1;for(int d=vlen-1;d>=0;d--){dr[d]=now%clen;now/=clen;}
-            int up=0;while(up<vlen&&dl[up]==dr[up])up++;
-            now=L;for(int d=vlen-1;d>=0;d--){int ci=now%clen;ENC(buf+plen+d*scl,ci);now/=clen;}
+            const int up = common_radix_prefix(L, R - 1, clen, vlen);
+            uint64_t now=L;for(int d=vlen-1;d>=0;d--){int ci=now%clen;ENC(buf+plen+d*scl,ci);now/=clen;}
             name.PRELEN=plen+up*scl;name.load_prefix(buf,nlen);
             consume_seq(buf,nlen,name,plen+up*scl,vlen-up,L,R);
 #endif
@@ -432,12 +480,10 @@ inline int engine_main(int argc,char**argv){
             int epre=plen+extra*scl,evar=varlen_task;
             L=rng()%random_range_max;R=L+CHUNK_SIZE;
 #if PBB_HAS_SIMD
-            // 取模法计算 up: 找到 L 和 R-1 最高的共同 clen 进制位
-            int up=0;{uint64_t dl=L,dr=R-1,div=1;for(int d=0;d<evar;d++)div*=clen;
-                while(up<evar){div/=clen;if(dl/div!=dr/div)break;dl%=div;dr%=div;up++;}}
+            const int up = common_radix_prefix(L, R - 1, clen, evar);
             int epre_b=epre+up*scl;
             // 初始化第一个候选的 digits
-            int digits[16];uint64_t now=L;
+            int digits[512];uint64_t now=L;  // 容量与名字缓冲区一致。
             for(int d=evar-1;d>=0;d--){digits[d]=(int)(now%clen);now/=clen;ENC(buf+epre+d*scl,digits[d]);}
             names[0].PRELEN=epre_b;names[0].load_prefix(buf,nlen);
             for(int lane=1;lane<BATCH_WIDTH;lane++){
@@ -501,11 +547,8 @@ inline int engine_main(int argc,char**argv){
                 if(i+1<R)advance_buf();
             }
 #else
-            uint8_t dl[16],dr[16];uint64_t now2;
-            now2=L;for(int d=evar-1;d>=0;d--){dl[d]=now2%clen;now2/=clen;}
-            now2=R-1;for(int d=evar-1;d>=0;d--){dr[d]=now2%clen;now2/=clen;}
-            int up=0;while(up<evar&&dl[up]==dr[up])up++;
-            now2=L;for(int d=evar-1;d>=0;d--){int ci=now2%clen;ENC(buf+epre+d*scl,ci);now2/=clen;}
+            const int up = common_radix_prefix(L, R - 1, clen, evar);
+            uint64_t now2=L;for(int d=evar-1;d>=0;d--){int ci=now2%clen;ENC(buf+epre+d*scl,ci);now2/=clen;}
             name.PRELEN=epre+up*scl;name.load_prefix(buf,nlen);
             consume_seq(buf,nlen,name,epre+up*scl,evar-up,L,R);
 #endif

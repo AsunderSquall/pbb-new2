@@ -159,7 +159,7 @@ static inline uint64_t derive_chunk_seed(uint64_t g_seed,int task_id){
 // prefix_id/suffix_id: 均为「1 基」编号, 使用时先减 1 再对数量取模 (见消费端) ——
 //   之所以 1 基, 是为了与配置里的序号语义及历史版本保持一致。
 // task_id: 从 0 递增, 用于 mex 收敛统计与 chunk_seed 派生。
-struct TaskData{uint64_t L,R;int prefix_id,suffix_id,type,task_id;uint64_t chunk_seed;};
+struct TaskData{uint64_t L,R,task_id,chunk_seed;int prefix_id,suffix_id,type;};
 // 环形队列 (h = 取指针, t = 放指针): h==t 表示空; 关闭后不再接受新任务, 但消费者
 // 会把队列里剩余的任务全部取完才退出 (q_get 仅在 closed && 空 时返回 false)。
 struct TaskQueue{TaskData d[MAX_QUEUE_LEN];int h=0,t=0;bool closed=false;std::mutex mtx;std::condition_variable cv_add,cv_get;};
@@ -204,6 +204,9 @@ static std::string hex_decode(const std::string& h){std::string o;for(size_t i=0
 //   这一条被消费端依赖 (np/ns 恒 >= 1, 不会有除零); 配置里用 "+" 显式表示空串。
 static std::vector<std::string> split_csv(const std::string& s){std::vector<std::string> v;if(s.empty()){v.push_back("");return v;}std::string cur;for(char c:s){if(c==','){v.push_back(cur);cur.clear();}else cur+=c;}v.push_back(cur);return v;}
 
+#include "affix_params.hpp"
+#include "radix_range.hpp"
+
 // ===== 引擎入口 =====
 #if PBB_UI_ENGINE
 // ---- UI 引擎专用: 各族 Top 5 排行榜 ----
@@ -230,6 +233,16 @@ static inline void ui_write_hex(FILE* f,const std::string& s){
 #endif
 
 #include "flex_layout.hpp"
+#include <filesystem>
+
+static FILE* open_output_path(const std::string& path, const char* mode) {
+#if defined(_WIN32)
+    const std::wstring wide_mode(mode, mode + strlen(mode));
+    return _wfopen(std::filesystem::u8path(path).c_str(), wide_mode.c_str());
+#else
+    return fopen(path.c_str(), mode);
+#endif
+}
 
 inline int engine_main(int argc,char**argv){
     (void)argc;(void)argv;   // 不使用命令行参数: 全部配置走 stdin 的 key=value 协议
@@ -253,18 +266,37 @@ inline int engine_main(int argc,char**argv){
     std::string team=kv["team_name"];int n_threads=std::stoi(kv["n_threads"]);
     int scl=std::stoi(kv["scl"]),clen=std::stoi(kv["charset_len"]);
     std::string cbytes=hex_decode(kv["charset_bytes"]);
-    auto prefixes=split_csv(kv["prefixes"]),suffixes=split_csv(kv["suffixes"]);
+    std::vector<std::string> prefixes, suffixes;
+    if (!read_affix_param(kv, "prefixes", prefixes) || !read_affix_param(kv, "suffixes", suffixes))
+        return 1;
     int np=(int)prefixes.size(),ns=(int)suffixes.size();
     int mode=std::stoi(kv["mode"]),vlen=std::stoi(kv["variable_len"]);
     uint64_t rL=std::stoull(kv["range_L"]),rR=std::stoull(kv["range_R"]);
+    if (scl < 1 || scl > 64 || clen < 1 || cbytes.size() != size_t(scl) * clen) {
+        fprintf(stderr,"[engine] ERROR: empty or incomplete character set\n");
+        return 1;
+    }
+    if (mode < 1 || mode > 4 || n_threads < 1 || n_threads > 256 || vlen < 1 || rL > rR) {
+        fprintf(stderr,"[engine] ERROR: invalid mode, thread count, variable length, or range\n");
+        return 1;
+    }
+
     FlexLayout flex;
     if (!flex.parse(kv)) { fprintf(stderr,"[engine] ERROR: invalid flex layout\n"); return 1; }
-    if (flex.enabled) {
-        for (const auto& p:prefixes) for (const auto& s:suffixes)
-            if (p.size()+flex.text.size()+s.size() >= 512) {
-                fprintf(stderr,"[engine] ERROR: flex name exceeds buffer\n"); return 1;
-            }
-        if (mode==1) { rR=std::min(rR,flex.total); rL=std::min(rL,rR); }
+    if (flex.enabled && mode == 1) {
+        rR = std::min(rR, flex.total);
+        rL = std::min(rL, rR);
+    }
+
+    const auto longest_affix = [](const auto& names) {
+        size_t longest = 0;
+        for (const auto& name : names) longest = std::max(longest, name.size());
+        return longest;
+    };
+    const size_t body_size = flex.enabled ? flex.text.size() : size_t(vlen) * scl;
+    if (longest_affix(prefixes) + body_size + longest_affix(suffixes) >= 512) {
+        fprintf(stderr,"[engine] ERROR: name exceeds engine buffer\n");
+        return 1;
     }
     // 逐族评分阈值 (MNAME 序): min_qp/min_qd/min_pp/min_pd/min_cqd/min_cp/min_fp/min_wc/min_fs/min_pj
     // <=0 视为该族不参与门控。
@@ -284,7 +316,7 @@ inline int engine_main(int argc,char**argv){
     for(int m=0;m<M_N;m++)ptt_[m]=(kPttKey[m][0]&&kv.count(kPttKey[m]))?std::stoi(kv[kPttKey[m]]):0;
 
     // ---- 评分计划 (score_list + score_mode) ----
-    // score_list: 逗号分隔的族名, 声明要计算哪些评分 (空 ⇒ 全 10 族, 按 MNAME 序)。
+    // score_list: 逗号分隔的评分族名，留空时不写普通结果。
     //   支持的 token: qp qd pp pd cqd cp fp wc fs pj; 别名 rh = fs (人海)。
     //   未列出的族完全不计算 (sc 恒为 0), 从而真正省下对应点积/特征构造。
     // score_mode: all = 全部算完; any = 按 list 顺序算, 遇首个 (min_>0 且 sc>=min_)
@@ -292,7 +324,7 @@ inline int engine_main(int argc,char**argv){
     // 重要: any 会改变「实际被计算/被输出分数」的集合 (未算族 sc 保持 0, 且若 output_xp 打开
     //   会打印 0), 因此它不是「保持语义的提速手段」, 只能用于明确接受该副作用的任务。
     // 计划构建:
-    //   * score_list 为空 ⇒ 全 10 族按 MNAME 序;
+    //   * score_list 为空时保持空计划；
     //   * 重复 token 只取首次出现的位置 (order 去重), 未识别 token 打警告后忽略;
     //   * minv/pttv 总是从 min_/ptt_ 全量拷贝, 与 comp 无关 (未 comp 的族值不参与计算)。
     ScorePlan plan={};plan.norder=0;
@@ -314,21 +346,15 @@ inline int engine_main(int argc,char**argv){
                 if(!hit)fprintf(stderr,"[engine] WARN: unknown score token '%s' ignored\n",t.c_str());
             }
         }
-        if(plan.norder==0)for(int m=0;m<M_N;m++){plan.comp[m]=true;plan.order[plan.norder++]=m;}
+        if (plan.norder == 0)
+            fprintf(stderr, "[engine] WARN: 评分族为空，测号文件不会产生任何输出！\n");
         for(int m=0;m<M_N;m++)plan.minv[m]=min_[m];
         for(int m=0;m<M_N;m++)plan.pttv[m]=ptt_[m];
         std::string sm=kv.count("score_mode")?kv["score_mode"]:"all";
         plan.any_mode=(sm=="any");
     }
-    int collect_mode=kv.count("collect_mode")?std::stoi(kv["collect_mode"]):0;  // 0=否, 1=硬编码阈值, 2=自定义阈值
-    // collect_mode=2: 自定义阈值 (对齐原版 special_thresholds)
-    // 收集语义独立于普通评分门控: 即使名字没被普通阈值放行, 只要满足 blue 判据也会进 out/blue.txt,
-    //   因此特殊号收集不能当作「普通结果文件的子集」。mode 1 使用内置常数, mode 2 用这四个 kv。
-    int c_8v=0,c_7v=0,c_hl=0,c_hp=0;
-    if(collect_mode==2){
-        c_8v=std::stoi(kv["c_eight_v_min"]);c_7v=std::stoi(kv["c_seven_v_min"]);
-        c_hl=std::stoi(kv["c_hl_min"]);c_hp=std::stoi(kv["c_hp398_min"]);
-    }
+    // 预设特殊号走独立的 blue.txt，不受普通评分门控影响。
+    const bool collect_blue = kv.count("collect_mode") && kv["collect_mode"] == "1";
     int output_xp=kv.count("output_xp")?std::stoi(kv["output_xp"]):1;
     int output_log=kv.count("output_log")?std::stoi(kv["output_log"]):1;
     int output_speed=kv.count("output_speed")?std::stoi(kv["output_speed"]):1;
@@ -348,9 +374,17 @@ inline int engine_main(int argc,char**argv){
     if(kv.count("prefix_range_L") && kv.count("prefix_range_R")){
         auto parts_L = split_csv(kv["prefix_range_L"]);
         auto parts_R = split_csv(kv["prefix_range_R"]);
+        if (parts_L.size() != size_t(np) || parts_R.size() != size_t(np)) {
+            fprintf(stderr,"[engine] ERROR: prefix range count does not match prefixes\n");
+            return 1;
+        }
         for(size_t i=0;i<parts_L.size()&&i<parts_R.size();i++){
             prefix_L.push_back(std::stoull(parts_L[i]));
             prefix_R.push_back(std::stoull(parts_R[i]));
+            if (prefix_L.back() > prefix_R.back()) {
+                fprintf(stderr,"[engine] ERROR: prefix range end is before start\n");
+                return 1;
+            }
         }
         has_prefix_ranges = !prefix_L.empty();
     }
@@ -364,12 +398,17 @@ inline int engine_main(int argc,char**argv){
     // 打不开即返回 1: 宁可失败也不静默丢结果。
     // 日志/速度三条流的选择 (由 output_log/output_speed 决定): 打开时写 stderr, 关闭时写
     //   out/task_log.txt / out/speed_log.txt。写 stderr 是为了让 Python 侧实时读取进度。
-    // blue.txt 仅在 collect_mode>=1 时打开。
+    // blue.txt 仅在启用预设收集时打开。
     std::string out_path="out/"+kv["result_file"];
-    FILE*fp=fopen(out_path.c_str(),"a");if(!fp){fprintf(stderr,"[engine] ERROR: cannot open %s\n",out_path.c_str());return 1;}
-    FILE*fp_blue=nullptr;if(collect_mode>=1)fp_blue=fopen("out/blue.txt","a");  // mode 1/2 均收集
+    FILE*fp=open_output_path(out_path,"a");if(!fp){fprintf(stderr,"[engine] ERROR: cannot open %s\n",out_path.c_str());return 1;}
+    FILE*fp_blue = collect_blue ? fopen("out/blue.txt", "a") : nullptr;
     FILE*flog=output_log?stderr:fopen("out/task_log.txt","a");
     FILE*fspeed=output_speed?stderr:fopen("out/speed_log.txt","a");
+    if (!flog || !fspeed || (collect_blue && !fp_blue)) {
+        const char* failed = !flog ? "task_log.txt" : !fspeed ? "speed_log.txt" : "blue.txt";
+        fprintf(stderr,"[engine] ERROR: cannot open out/%s\n",failed);
+        return 1;
+    }
     const bool checkpoint = flex.enabled && mode==1 && kv.count("flex_resume_id");
     std::vector<uint64_t> resume_start(checkpoint?np:0), resume_frontier(checkpoint?np:0), resume_end(checkpoint?np:0);
     std::vector<std::map<uint64_t,uint64_t>> resume_pending(checkpoint?np:0);
@@ -378,7 +417,7 @@ inline int engine_main(int argc,char**argv){
         resume_start[i]=resume_frontier[i]=has_prefix_ranges?prefix_L[i]:rL;
     }
     if(checkpoint){
-        FILE* old=fopen((out_path+".resume").c_str(),"r");
+        FILE* old=open_output_path(out_path+".resume","r");
         if(old){
             char id[128]={};
             if(fgets(id,sizeof(id),old)){
@@ -392,23 +431,32 @@ inline int engine_main(int argc,char**argv){
             fclose(old);
         }
     }
+    bool checkpoint_warning = false;
+    auto warn_checkpoint = [&] {
+        if (checkpoint_warning) return;
+        fprintf(stderr,"[engine] WARNING: cannot save %s.resume\n",out_path.c_str());
+        checkpoint_warning = true;
+    };
     auto save_checkpoint=[&](){
         if(!checkpoint)return;
         // 输出先落到流，再发布连续完成位置。失败保留旧检查点，最多重复计算。
         if(ferror(fp) || fflush(fp)!=0 || (fp_blue && (ferror(fp_blue) || fflush(fp_blue)!=0)))return;
         std::string target=out_path+".resume", temp=target+".tmp";
-        FILE* f=fopen(temp.c_str(),"w");if(!f)return;
+        FILE* f=open_output_path(temp,"w");
+        if(!f){warn_checkpoint();return;}
         fprintf(f,"%s\n",kv["flex_resume_id"].c_str());
         for(int i=0;i<np;++i)fprintf(f,"%llu %llu %llu\n",
             (unsigned long long)resume_start[i],(unsigned long long)resume_frontier[i],(unsigned long long)resume_end[i]);
         bool ok=!ferror(f);if(fclose(f)!=0)ok=false;
         if(ok){
 #if defined(_WIN32)
-            MoveFileExA(temp.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+            ok=MoveFileExW(std::filesystem::u8path(temp).c_str(),std::filesystem::u8path(target).c_str(),
+                           MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH) != 0;
 #else
-            std::rename(temp.c_str(),target.c_str());
+            ok=std::rename(temp.c_str(),target.c_str()) == 0;
 #endif
         }
+        if(!ok)warn_checkpoint();
     };
     save_checkpoint();
     fprintf(flog,"[engine] SIMD: %s\n",PBB_SIMD_NAME);fflush(flog);
@@ -419,7 +467,8 @@ inline int engine_main(int argc,char**argv){
     // 只做一次: 队伍名决定 val_base, 之后被所有线程只读共享 (name_init 仅作模板)。
     // max_sc[] 与 max_sum 是「全局最高分」统计, 由 out_mtx 保护并在 SUMMARY 行汇报。
     Name name_init;name_init.load_team(team.c_str());
-    TaskQueue q;std::mutex out_mtx;std::atomic<int>tasks_done{0},total_found{0};
+    TaskQueue q;std::mutex out_mtx;
+    unsigned long long tasks_done=0,total_found=0;
     int max_sum=0;int max_sc[M_N]={0};      // 全局最大值 (out_mtx 保护): 八围最高 + 各族最高分
 #if PBB_UI_ENGINE
     UiTopEntry ui_top[M_N][5];
@@ -441,34 +490,27 @@ inline int engine_main(int argc,char**argv){
         fprintf(stderr,"UI_TOP_END\n");fflush(stderr);
     };
 #endif
-    int mex_cur=0;                          // 最小未完成 task_id
-    std::vector<bool> mex_vis;              // task_id 完成标记
-    unsigned long long ALL_totnum;  // 总名字数 (用于 time left + SUMMARY speed)
-    // 计数口径 (直接影响进度百分比与 speed 的可比性, 不可随意改):
-    //   * 有 per-prefix ranges: mode 1 按各前缀区间长度之和; 随机模式按「向上取整到整 chunk」再乘
-    //     CHUNK_SIZE —— 因为尾 chunk 依然会跑满 100 万候选。
-    //   * 无 per-prefix ranges: mode 1 为 (rR-rL)*np (每个前缀都跑完整区间);
-    //     mode 2/4 与 mode 3 为整 chunk 数 × CHUNK_SIZE; mode 2/4 还要再按整 chunk 上取整。
-    //   因此 ALL_totnum 是「实际会处理的候选数」, 而 SUMMARY 的 speed 由它导出 (纯算力吞吐)。
+    unsigned long long mex_cur=0,contiguous=0,processed=0;
+    std::map<uint64_t,uint64_t> completed_tasks;
+    const auto add_count = [](uint64_t a, uint64_t b) {
+        return a + std::min(b, UINT64_MAX - a);
+    };
+    const auto work_size = [&](uint64_t size) {
+        if ((mode != 2 && mode != 4) || size % CHUNK_SIZE == 0) return size;
+        return add_count(size, CHUNK_SIZE - size % CHUNK_SIZE);
+    };
+    uint64_t ALL_totnum = 0;
     if(has_prefix_ranges){
-        // 每个前缀有自己的区间, 分别求和
-        ALL_totnum = 0;
-        if(mode==1){
-            for(int j=0;j<np;j++) ALL_totnum += prefix_R[j] - prefix_L[j];
-        } else {
-            uint64_t total_chunks = 0;
-            for(int j=0;j<np;j++) total_chunks += (prefix_R[j] - prefix_L[j] + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            ALL_totnum = total_chunks * CHUNK_SIZE;
-        }
+        for(int j=0;j<np;j++) ALL_totnum=add_count(ALL_totnum,work_size(prefix_R[j]-prefix_L[j]));
     } else {
-        ALL_totnum = (rR-rL)*np;
-        if(mode>=2) ALL_totnum = rR - rL;
-        if(mode==2||mode==4) ALL_totnum = ((rR - rL + CHUNK_SIZE - 1) / CHUNK_SIZE) * CHUNK_SIZE;
+        const uint64_t size=work_size(rR-rL);
+        const uint64_t repeat=mode==1 ? np : 1;
+        ALL_totnum=size>UINT64_MAX/repeat ? UINT64_MAX : size*repeat;
     }
     auto t_start=std::chrono::steady_clock::now();
     // cur_speed: 定期速度采样 (每 1000 task ≈ 1B 名字), 对齐原版 pbb_all.cpp
     auto t_cur_last = t_start;
-    int td_cur_last = 0;
+    unsigned long long processed_last = 0;
     // ---- 随机种子 (A1: 种子驱动随机 mode, 为分布式可复现性预留) ----
     //   seed 缺失 / 为空 / 为 "-1": 用时间熵 (单机默认, 每次结果不同, 行为不变)
     //   seed 为具体数值        : 确定性种子 (分布式: 服务端给每个 task 存固定 seed,
@@ -489,29 +531,9 @@ inline int engine_main(int argc,char**argv){
     //   (再被配置的 vlen 封顶)。random_range_max = clen^varlen_task, 是随机区间的取模上界。
     // 目的: 让随机模式每个 chunk 也能顺序走满 100 万候选, 而不是逐个随机生成。
     int varlen_task=vlen;uint64_t random_range_max=1;
-    if(mode>=2 && !flex.enabled){varlen_task=0;uint64_t x=1;while(x<CHUNK_SIZE){varlen_task++;x*=clen;}if(varlen_task>vlen)varlen_task=vlen;random_range_max=x;}
+    if(mode>=2 && !flex.enabled){varlen_task=0;uint64_t x=1;while(clen > 1 && x < CHUNK_SIZE){varlen_task++;x*=clen;}if(varlen_task>vlen)varlen_task=vlen;random_range_max=x;}
 
-    // 预分配 mex_vis (预计 task 数, 留 20% 余量)
-    // mode 1 (无 per-prefix ranges): 每个 prefix 跑完整区间 → 总 task = range_chunks × np
-    // mode 2/3/4 (无 per-prefix ranges): producer 只按 interval 切 chunk → 总 task = range_chunks
-    // 有 per-prefix ranges: 每个 prefix 在自己区间内切 chunk → 总 task = sum(各 prefix 的 chunk 数)
-    uint64_t est_tasks_u;
-    if(has_prefix_ranges){
-        est_tasks_u = 0;
-        for(int j=0;j<np;j++) est_tasks_u += (prefix_R[j] - prefix_L[j] + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    } else {
-        uint64_t range_chunks = (rR - rL + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        est_tasks_u = (mode == 1 ? range_chunks * (uint64_t)np : range_chunks);
-    }
-    // 安全上限: 10M 条已覆盖任何实际运行场景, 防止超大 range 或 uint64 溢出 (mex_vis 支持动态扩容)
-    // 注意这里只是「预分配规模」的上限; 真正的 task_id 仍可超过它, 由消费端的 resize 兜底。
-    // 预留 20% + 10 的余量避免频繁扩容, 但容量不是正确性依赖。
-    if (est_tasks_u > 10000000ULL) est_tasks_u = 10000000ULL;
-    int est_tasks = (int)(est_tasks_u * 1.2) + 10;
-    mex_vis.resize(est_tasks,false);
-
-    // ---- task_id 序号生成器 ----
-    int task_id_counter=0;
+    uint64_t task_id_counter=0;
 
     // 动态线程数: worker id >= target_threads 时该线程睡眠, 不取任务。
     // 允许下调到 0 = 「暂停计算」: 此时所有 worker 都睡, 生产者也不再投喂
@@ -558,11 +580,11 @@ inline int engine_main(int argc,char**argv){
         if(has_prefix_ranges){
             for(int j=0;j<np&&!stopped;j++){
                 uint64_t pl=prefix_L[j], pr=prefix_R[j];
-                for(uint64_t i=pl;i<pr;i+=CHUNK_SIZE){
+                for(uint64_t i=pl;i<pr;i=chunk_end(i,pr,CHUNK_SIZE)){
                     if(stopped)break;
                     wait_if_paused();
                     if(pbb_stop_requested()){stop();break;}
-                    uint64_t tr=i+CHUNK_SIZE;if(tr>pr)tr=pr;
+                    uint64_t tr=chunk_end(i,pr,CHUNK_SIZE);
                     TaskData t;t.L=i;t.R=tr;t.type=mode;
                     t.prefix_id=j+1;
                     t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
@@ -574,19 +596,19 @@ inline int engine_main(int argc,char**argv){
             }
         } else {
             if(mode==1)for(int j=0;j<np&&!stopped;j++)
-                for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
+                for(uint64_t i=rL;i<rR;i=chunk_end(i,rR,CHUNK_SIZE)){
                     if(stopped)break;
                     wait_if_paused();
                     if(pbb_stop_requested()){stop();break;}
-                    uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
+                    uint64_t tr=chunk_end(i,rR,CHUNK_SIZE);
                     TaskData t;t.L=i;t.R=tr;t.type=1;t.prefix_id=j+1;t.suffix_id=(j%ns)+1;
                     t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
                     if(!put(t)){stop();break;}}
-            else for(uint64_t i=rL;i<rR;i+=CHUNK_SIZE){
+            else for(uint64_t i=rL;i<rR;i=chunk_end(i,rR,CHUNK_SIZE)){
                 if(stopped)break;
                 wait_if_paused();
                 if(pbb_stop_requested()){stop();break;}
-                uint64_t tr=i+CHUNK_SIZE;if(tr>rR)tr=rR;
+                uint64_t tr=chunk_end(i,rR,CHUNK_SIZE);
                 TaskData t;t.L=i;t.R=tr;t.type=mode;
                 t.task_id=task_id_counter++;t.chunk_seed=derive_chunk_seed(g_seed,t.task_id);
                 std::mt19937_64 prng(t.chunk_seed);
@@ -635,7 +657,7 @@ inline int engine_main(int argc,char**argv){
 #endif
 
         // ---- 公共 helper: 评分 + blue 判定 (四种模式共享, 消除重复) ----
-        // 逐族阈值门控: 任一参与族 (min_[m]>0) 达标即输出; 无参与族时保留全部过初筛候选。
+        // 有评分族但未设阈值时，保留全部过初筛候选。空计划不写普通结果。
         // 前置: r.flag 已由 score_full 置位 (初筛/门控淘汰的名字 flag=false, 直接返回, 连
         //   最高分统计都不更新)。
         // 注意顺序: 先更新 max 统计与 UI 榜, 再做 keep 判定 —— 因此 max 统计覆盖「过了初筛
@@ -655,9 +677,7 @@ inline int engine_main(int argc,char**argv){
                 }
 #endif
             }
-            // any_gate=false (没有任何参与族) 时 keep 恒为 true: 此时引擎退化成「只做初筛,
-            //   所有过筛名字全部记录」, 用于统计与调试。
-            const bool keep=score_output_keep(plan,r,any_gate);
+            const bool keep = plan.norder > 0 && score_output_keep(plan, r, any_gate);
             if(keep){std::lock_guard lk(out_mtx);local_found++;
                 // 输出格式: 名字@队伍名 [分数...]。分数列按 MNAME 序取「被计算 (plan.comp)」
                 //   的子集 —— 不是固定的 XP/XD 两列。output_xp=0 时只写名字与队伍。
@@ -667,14 +687,16 @@ inline int engine_main(int argc,char**argv){
                 else fprintf(fp,"%.*s@%s\n",nlen,buf,team.c_str());
                 fflush(fp);}
             // props[7] 已是原始 HP (154..406, 无 +36 偏移); props[0..6] 含 +36 偏移。
-            // 对齐原版 pbb_old.cpp 的 blue 判据 (sum*3-prop[7] / sum-prop[7]/3 / prop[7]==398)。
-            // 单位说明: sum = V + 252 为八围总分; hp=398 是特殊号判据里的固定哨兵值。
-            // collect_mode==1 用内置常数 (777/2000/741/93), ==2 用配置阈值 (c_8v/c_7v/c_hp/c_hl)。
-            // 收集走独立锁区, 与结果文件写入分开, 二者互不影响。
-            if(collect_mode>=1&&fp_blue){int sum=r.sum,hp=r.props[7],hl=*std::min_element(r.props,r.props+7);bool blue=false;
-                if(collect_mode==1){if(sum>=777||(sum*3-hp)>=2000||(hp==398&&sum>=741)||(hl>=93))blue=true;}
-                else{if(sum>=c_8v||(sum-hp/3)>=c_7v||(hp==398&&sum>=c_hp)||(hl>=c_hl))blue=true;}
-                if(blue){std::lock_guard lk(out_mtx);fprintf(fp_blue,"%.*s@%s\n",nlen,buf,team.c_str());fflush(fp_blue);}}
+            // sum = V + 252 为八围总分。收集走独立锁区，与普通结果写入分开。
+            if (fp_blue) {
+                const int sum = r.sum, hp = r.props[7];
+                const int hl = *std::min_element(r.props, r.props + 7);
+                if (sum >= 777 || sum * 3 - hp >= 2000 || (hp == 398 && sum >= 741) || hl >= 93) {
+                    std::lock_guard lk(out_mtx);
+                    fprintf(fp_blue, "%.*s@%s\n", nlen, buf, team.c_str());
+                    fflush(fp_blue);
+                }
+            }
         };
 
         // ---- 编码 helper: 顺序进位 (mode 1/2/4 共用) ----
@@ -697,7 +719,7 @@ inline int engine_main(int argc,char**argv){
         // ---- mode 1: 固定批宽候选交错 KSA，持久 digits/carry 生成连续候选 ----
         // SIMD 档 (PBB_HAS_SIMD) 才有批量路径; 非 SIMD 档退回 consume_seq 逐候选。
         // 批量路径的逻辑:
-        //   1. 用「取模法」求 up = 最高的共同 clen 进制位 (L 与 R-1 从该位起才不同);
+        //   1. 求 L 与 R-1 共享的高位数 up；
         //      epre = plen + up*scl 即所有候选共享的最长字节前缀, 交给 load_prefix 预处理一次;
         //   2. 把 lane0 的前缀状态 (i_pre/j_pre/s_pre/NAMELEN/val_base2/saved_val) 整体复制给
         //      lane1..3 —— 这是 load_name_batch4 的前提 (四 lane 必须同状态);
@@ -707,12 +729,10 @@ inline int engine_main(int argc,char**argv){
         // buf 长度约束: 名字缓冲固定 char buf[512], 因此 plen + vlen*scl + slen 必须 < 512。
         auto consume_mode1=[&](char* buf,int nlen,Name& name,int plen,int vlen,uint64_t L,uint64_t R){
 #if PBB_HAS_SIMD
-            // 取模法计算 up: 找到 L 和 R-1 最高的共同 clen 进制位
-            int up=0;{uint64_t dl=L,dr=R-1,div=1;for(int d=0;d<vlen;d++)div*=clen;
-                while(up<vlen){div/=clen;if(dl/div!=dr/div)break;dl%=div;dr%=div;up++;}}
+            const int up = common_radix_prefix(L, R - 1, clen, vlen);
             int epre=plen+up*scl;
             // 初始化第一个候选的 digits (仅需要 advance_buf 使用)
-            int digits[16];uint64_t now=L;
+            int digits[512];uint64_t now=L;  // 容量与名字缓冲区一致。
             for(int d=vlen-1;d>=0;d--){digits[d]=(int)(now%clen);now/=clen;ENC(buf+plen+d*scl,digits[d]);}
             names[0].PRELEN=epre;names[0].load_prefix(buf,nlen);
             for(int lane=1;lane<BATCH_WIDTH;lane++){
@@ -761,11 +781,8 @@ inline int engine_main(int argc,char**argv){
                 if(i+1<R)advance_buf();
             }
 #else
-            uint8_t dl[16],dr[16];uint64_t now;
-            now=L;for(int d=vlen-1;d>=0;d--){dl[d]=now%clen;now/=clen;}
-            now=R-1;for(int d=vlen-1;d>=0;d--){dr[d]=now%clen;now/=clen;}
-            int up=0;while(up<vlen&&dl[up]==dr[up])up++;
-            now=L;for(int d=vlen-1;d>=0;d--){int ci=now%clen;ENC(buf+plen+d*scl,ci);now/=clen;}
+            const int up = common_radix_prefix(L, R - 1, clen, vlen);
+            uint64_t now=L;for(int d=vlen-1;d>=0;d--){int ci=now%clen;ENC(buf+plen+d*scl,ci);now/=clen;}
             name.PRELEN=plen+up*scl;name.load_prefix(buf,nlen);
             consume_seq(buf,nlen,name,plen+up*scl,vlen-up,L,R);
 #endif
@@ -784,12 +801,10 @@ inline int engine_main(int argc,char**argv){
             int epre=plen+extra*scl,evar=varlen_task;
             L=rng()%random_range_max;R=L+CHUNK_SIZE;
 #if PBB_HAS_SIMD
-            // 取模法计算 up: 找到 L 和 R-1 最高的共同 clen 进制位
-            int up=0;{uint64_t dl=L,dr=R-1,div=1;for(int d=0;d<evar;d++)div*=clen;
-                while(up<evar){div/=clen;if(dl/div!=dr/div)break;dl%=div;dr%=div;up++;}}
+            const int up = common_radix_prefix(L, R - 1, clen, evar);
             int epre_b=epre+up*scl;
             // 初始化第一个候选的 digits
-            int digits[16];uint64_t now=L;
+            int digits[512];uint64_t now=L;  // 容量与名字缓冲区一致。
             for(int d=evar-1;d>=0;d--){digits[d]=(int)(now%clen);now/=clen;ENC(buf+epre+d*scl,digits[d]);}
             names[0].PRELEN=epre_b;names[0].load_prefix(buf,nlen);
             for(int lane=1;lane<BATCH_WIDTH;lane++){
@@ -832,11 +847,8 @@ inline int engine_main(int argc,char**argv){
                 if(i+1<R)advance_buf();
             }
 #else
-            uint8_t dl[16],dr[16];uint64_t now2;
-            now2=L;for(int d=evar-1;d>=0;d--){dl[d]=now2%clen;now2/=clen;}
-            now2=R-1;for(int d=evar-1;d>=0;d--){dr[d]=now2%clen;now2/=clen;}
-            int up=0;while(up<evar&&dl[up]==dr[up])up++;
-            now2=L;for(int d=evar-1;d>=0;d--){int ci=now2%clen;ENC(buf+epre+d*scl,ci);now2/=clen;}
+            const int up = common_radix_prefix(L, R - 1, clen, evar);
+            uint64_t now2=L;for(int d=evar-1;d>=0;d--){int ci=now2%clen;ENC(buf+epre+d*scl,ci);now2/=clen;}
             name.PRELEN=epre+up*scl;name.load_prefix(buf,nlen);
             consume_seq(buf,nlen,name,epre+up*scl,evar-up,L,R);
 #endif
@@ -947,6 +959,10 @@ inline int engine_main(int argc,char**argv){
             // 末尾把 local_* 清零 —— 忘记清零会导致后续 chunk 重复累加 (历史 bug 类型)。
             {
                 std::lock_guard lk(out_mtx);
+                if (ferror(fp) || (fp_blue && ferror(fp_blue))) {
+                    g_stop_requested.store(true,std::memory_order_relaxed);
+                    break;
+                }
                 total_found+=local_found;
                 if(checkpoint){
                     int i=t.prefix_id-1;
@@ -963,34 +979,36 @@ inline int engine_main(int argc,char**argv){
                 if(ui_mode)for(int m=0;m<M_N;m++)for(const auto& entry:local_top[m])
                     ui_top_insert(ui_top[m],entry);
 #endif
-                // mex 追踪 (原版 mex_vis + mex_cur)
-                // mex_cur = 最小未完成 task_id, 用于判断「已连续完成到哪个位置」。
-                // 动态扩容: task_id 可能超出预估容量 (预估有 10M 上限), 这里按需 +256 扩张。
-                if(t.task_id>=(int)mex_vis.size())mex_vis.resize(t.task_id+256,false);
-                mex_vis[t.task_id]=true;
-                while(mex_cur<(int)mex_vis.size()&&mex_vis[mex_cur])mex_cur++;
-                // 进度显示: 每 100 task (对齐原版)
-                int td=++tasks_done;
+                // 只有从运行起点连续完成的区间才能用于回写 start。
+                const uint64_t span=t.R-t.L;
+                processed=add_count(processed,work_size(span));
+                completed_tasks.emplace(t.task_id,span);
+                while(!completed_tasks.empty() && completed_tasks.begin()->first==mex_cur){
+                    contiguous=add_count(contiguous,completed_tasks.begin()->second);
+                    completed_tasks.erase(completed_tasks.begin());
+                    ++mex_cur;
+                }
+                const auto td=++tasks_done;
 #if PBB_UI_ENGINE
                 if(td==1)emit_ui_top();
 #endif
                 if(td%100==0){
                     auto now=std::chrono::steady_clock::now();
                     double sec=std::chrono::duration<double>(now-t_start).count();
-                    long long done_num=1ll*td*CHUNK_SIZE;
+                    const auto done_num=processed;
                     long long tmlft=ALL_totnum>done_num?((ALL_totnum-done_num)*1.0/done_num)*sec:0;
                     // 原版第一行: taskX finished, task_mex=Y, count:Z.ZZZT
-                    fprintf(flog,"task%d finished,task_mex=%d,count:%.6lfT\n",
-                        t.task_id,mex_cur,done_num/1e12);
+                    fprintf(flog,"task%llu finished,task_mex=%llu,count:%.6lfT,contiguous=%llu\n",
+                        (unsigned long long)t.task_id,mex_cur,done_num/1e12,contiguous);
                     // 原版第二行: tot=N, (八围, score_list 各族最高分), time: Xs, speed: XT/d, time left:XhXmXs
                     // 括号内第一个数是八围最高分 max_sum, 之后按 plan.order 顺序列出各族最高分 ——
                     //   因此当 score_list 只含部分族时, 列数会随计划变化 (不是固定 10 列)。
                     // speed 用「已完成 task 数 × CHUNK_SIZE / 墙钟」估算, 含等待 I/O 的开销;
                     //   权威吞吐以结尾的 SUMMARY 行为准 (它用纯计算耗时)。
-                    fprintf(fspeed,"tot=%d, (%d",total_found.load(),max_sum);
+                    fprintf(fspeed,"tot=%llu, (%d",total_found,max_sum);
                     for(int oi=0;oi<plan.norder;oi++)fprintf(fspeed,",%d",max_sc[plan.order[oi]]);
                     fprintf(fspeed,"),time: %.2fs, speed: %.6fT/d,time left:%lldh%lldm%llds\n",
-                        sec,td/sec*86400*CHUNK_SIZE/1e12,
+                        sec,done_num/sec*86400/1e12,
                         tmlft/3600,(tmlft%3600)/60,tmlft%60);
 #if PBB_UI_ENGINE
                     emit_ui_top();
@@ -1003,14 +1021,14 @@ inline int engine_main(int argc,char**argv){
                     if(td%1000==0){
                         auto t_cur=std::chrono::steady_clock::now();
                         double cur_sec=std::chrono::duration<double>(t_cur-t_cur_last).count();
-                        long long cur_done=(td-td_cur_last)*CHUNK_SIZE;
-                        long long cur_tmlft=ALL_totnum>done_num?((ALL_totnum-done_num)*1.0/cur_done)*cur_sec:0;
+                        const auto cur_done=processed-processed_last;
+                        long long cur_tmlft=ALL_totnum>done_num&&cur_done>0?((ALL_totnum-done_num)*1.0/cur_done)*cur_sec:0;
                         if(cur_sec>0)
                             fprintf(fspeed,"cur_speed:%.6fT/d,time left(?):%lldh%lldm%llds\n\n",
                                 86400.0*(cur_done/1e12)/cur_sec,
                                 cur_tmlft/3600,(cur_tmlft%3600)/60,cur_tmlft%60);
                         fflush(output_speed?stderr:fspeed);
-                        t_cur_last=t_cur;td_cur_last=td;
+                        t_cur_last=t_cur;processed_last=processed;
                     }
                 }
             }
@@ -1078,19 +1096,18 @@ inline int engine_main(int argc,char**argv){
     {
         auto t_end=std::chrono::steady_clock::now();
         double calc_sec=std::chrono::duration<double>(t_end-t_start).count();
-        unsigned long long processed=ALL_totnum;  // 总名字数 (= (rR-rL)*np)
-                                                  // 注意: 用估算量而非实际计数, 这是历史口径,
-                                                  // 与进度行的 speed 保持一致 (可比性优先)。
         double speed=calc_sec>0?(double)processed/calc_sec:0.0;
-        fprintf(stderr,"SUMMARY max_sum=%d max_xp=%d max_xd=%d found=%d count=%llu elapsed=%.6f speed=%.6f\n",
-            max_sum,max_sc[M_QP],max_sc[M_QD],total_found.load(),processed,calc_sec,speed);
+        fprintf(stderr,"SUMMARY max_sum=%d max_xp=%d max_xd=%d found=%llu count=%llu elapsed=%.6f speed=%.6f contiguous=%llu\n",
+            max_sum,max_sc[M_QP],max_sc[M_QD],total_found,processed,calc_sec,speed,contiguous);
         fflush(stderr);
     }
 
     // 关闭文件
     // 条件关闭: flog/fspeed 在「写 stderr」模式下不是本进程打开的文件, 不能 fclose。
+    const bool write_failed = ferror(fp) || (fp_blue && ferror(fp_blue)) || ferror(flog) || ferror(fspeed);
+    if (write_failed) fprintf(stderr,"[engine] ERROR: failed to write output files under out/\n");
     fclose(fp);if(fp_blue)fclose(fp_blue);
     if(!output_log&&flog!=stderr)fclose(flog);
     if(!output_speed&&fspeed!=stderr)fclose(fspeed);
-    return 0;
+    return write_failed ? 1 : 0;
 }

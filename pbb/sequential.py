@@ -55,14 +55,17 @@ def full_total(cfg: dict) -> int:
         from .flex import file_bytes, normalize_config
 
         normalized = normalize_config(cfg)
+        sizes = {}
         product = 1
         for item in normalized["format"]:
             if not (isinstance(item, dict) and set(item) == {"charset"}):
                 continue
-            cs = normalized["character_sets"][item["charset"]]
-            width = int(cs["single_char_length"])
-            data = file_bytes(cs) if "file" in cs else bytes.fromhex(_engine._build_charset(cs))
-            product *= max(1, len(data) // max(1, width))
+            family = item["charset"]
+            if family not in sizes:
+                cs = normalized["character_sets"][family]
+                data = file_bytes(cs) if "file" in cs else bytes.fromhex(_engine._build_charset(cs))
+                sizes[family] = len(data) // cs["single_char_length"]
+            product *= sizes[family]
         return _u64(product)
     entries = _charset_entries(cfg["character_set"])
     vlen = int(en.get("variable_length", 0) or 0)
@@ -93,16 +96,17 @@ def prefix_layout(cfg: dict) -> list[tuple[int, int]]:
 
 
 def _resolved_totals(cfg: dict, layout: list[tuple[int, int]], complete: int | None = None) -> list[int]:
-    """每个前缀的总量；``end = -1`` 时用完整字符集总量代入（只在这里算一次）。"""
+    """每个前缀的总量，截到实际可枚举空间，避免顺序编号回绕。"""
     if complete is None:
-        complete = full_total(cfg) if any(end == -1 for _start, end in layout) else 0
+        complete = full_total(cfg)
     totals = []
     for start, end in layout:
         start = _u64(start)
         if end == -1:
             totals.append(max(0, complete - start))
         else:
-            totals.append(max(0, _u64(end) - start))
+            limit = min(_u64(end), complete) if complete else _u64(end)
+            totals.append(max(0, limit - start))
     return totals
 
 
@@ -170,11 +174,13 @@ def effective_prefix_ranges(cfg: dict):
     layout = prefix_layout(cfg)
     if not layout:
         return []
-    complete = full_total(cfg) if any(end == -1 for _start, end in layout) else 0
+    complete = full_total(cfg)
     if any(end == -1 for _start, end in layout) and complete == 0:
         return None
     sizes = _resolved_totals(cfg, layout, complete)
-    start, end = global_bounds(cfg)
+    window = (cfg['enumeration'].get('ranges') or [{}])[0]
+    start, end = _u64(window.get('start', 0)), window.get('end', -1)
+    end = _u64(sum(sizes) if end in (-1, None) else end)
     ranges: list[tuple[int, int]] = []
     cursor = 0  # 当前前缀在全局坐标里的起点
     for index, (origin, _end) in enumerate(layout):

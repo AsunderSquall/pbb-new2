@@ -10,4 +10,11 @@
 //   注意 src/ 下那些 v0..v5/vgen 子目录是历史实验版本, 正常编译不使用它们 (见 README)。
 //   argc/argv 原样透传, 但引擎实际从 stdin 读取参数 (见 engine.hpp 的参数协议)。
 #include "engine.hpp"
-int main(int argc, char** argv) { return engine_main(argc, argv); }
+int main(int argc, char** argv) {
+    try {
+        return engine_main(argc, argv);
+    } catch (const std::exception& exc) {
+        fprintf(stderr, "[engine] ERROR: invalid parameters or startup failure: %s\n", exc.what());
+        return 1;
+    }
+}

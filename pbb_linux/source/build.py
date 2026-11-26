@@ -33,6 +33,9 @@ def _binary_digest(path):
         return hashlib.file_digest(fh, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(fh.read()).hexdigest()
 
 
+_ENGINE_PROTOCOL_VERSION = 5  # 单条目字符集与顺序枚举边界修复。
+
+
 def _record_binary(path, compiler, flags, engine_target=None):
     metadata = dict(version=2, mode=_build_mode(), machine=_machine_identity(),
                     platform=[sys.platform, platform.machine()], source=_engine_source_name(),
@@ -44,6 +47,7 @@ def _record_binary(path, compiler, flags, engine_target=None):
         metadata["python_abi"] = f"{sys.version_info.major}{sys.version_info.minor}"
     if engine_target is not None:
         metadata["engine_target"] = engine_target
+        metadata['engine_protocol'] = _ENGINE_PROTOCOL_VERSION
         metadata['build_config'] = _build_config_signature(compiler)
     with open(path + ".build.json", "w", encoding="utf-8") as fh:
         json.dump(metadata, fh, ensure_ascii=True)
@@ -60,7 +64,8 @@ def _binary_is_current(path, engine_target=None):
         current_abi = f"{sys.version_info.major}{sys.version_info.minor}"
         abi_ok = engine_target is not None or metadata.get("python_abi") == current_abi
         return (metadata.get("version") == 2 and compatible and abi_ok
-                and (engine_target is None or metadata.get("engine_target") == engine_target)
+                and (engine_target is None or (metadata.get("engine_target") == engine_target
+                     and metadata.get('engine_protocol') == _ENGINE_PROTOCOL_VERSION))
                 and metadata.get("source") == _engine_source_name()
                 and (engine_target is None or metadata.get('build_config') == _build_config_signature())
                 and metadata.get("digest") == _binary_digest(path))

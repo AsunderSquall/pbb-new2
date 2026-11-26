@@ -19,12 +19,12 @@ PBB 名字评分测号器 — Python 编排层.
 config → engine 键名映射: 见 config_schema.py (CONFIG_MAP)，唯一定义处。
 新增配置字段只需在 CONFIG_MAP 加一行，main.py 和 engine.py 自动同步。
 """
-import json, os, sys, time, argparse, uuid, tempfile
+import json, os, sys, time, argparse, uuid, unicodedata
 from datetime import datetime
 from typing import Any, Optional
 
 from build import ensure_all          # 编译模块
-from engine import run as run_engine  # 引擎执行
+from engine import EngineError, _custom_bytes, _plan_families, _split_trailing_ints, run as run_engine, validate_charset
 from config_schema import (           # config→engine 映射唯一真相源
     CONFIG_MAP, read_config, engine_default,
 )
@@ -50,41 +50,30 @@ def _build_charset_entries(cs: dict) -> tuple[list[bytes], int]:
     custom = cs.get("custom_values")
     buf = bytearray()
 
-    # 辅助: 解析 custom_values → bytes
-    def _cv_bytes():
-        if custom is None:
-            return b''
-        if isinstance(custom, str):
-            return custom.encode('utf-8')
-        if isinstance(custom, list) and custom:
-            return bytes(int(x) & 0xFF for x in custom)
-        return b''
-
     for t in types:
         if scl == 1:
             if t == 1:   buf.extend(b'0123456789')
             elif t == 2: buf.extend(b'abcdefghijklmnopqrstuvwxyz')
             elif t == 3: buf.extend(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-            elif t == 5: buf.extend(bytes(range(32, 127)))   # printable ASCII
-            elif t in (4,): buf.extend(_cv_bytes())
+            elif t in (4, 5): buf.extend(_custom_bytes(custom))
 
         elif scl == 2:
-            if t == 7: buf.extend(_cv_bytes())
+            if t == 7: buf.extend(_custom_bytes(custom))
             else:
                 return _build_via_engine(cs, scl)
 
         elif scl == 3:
-            if t == 7: buf.extend(_cv_bytes())
+            if t == 7: buf.extend(_custom_bytes(custom))
             else:
                 return _build_via_engine(cs, scl)
 
         elif scl == 4:
-            if t == 2: buf.extend(_cv_bytes())
+            if t == 2: buf.extend(_custom_bytes(custom))
             else:
                 return _build_via_engine(cs, scl)
 
         else:  # scl >= 5
-            if t == 1: buf.extend(_cv_bytes())
+            if t == 1: buf.extend(_custom_bytes(custom))
             else:
                 return _build_via_engine(cs, scl)
 
@@ -130,54 +119,33 @@ def _parse_name(name: str, prefixes: list, suffixes: list,
 
     name_bytes = name.encode('utf-8')
 
-    # 匹配前缀 (最长匹配, 字节级)
-    best_pi, best_plen = -1, -1
-    for pi, pfx in enumerate(prefixes):
-        if pfx in ("", "+"):
-            plen = 0
-        else:
-            pfx_bytes = pfx.encode('utf-8')
-            if not name_bytes.startswith(pfx_bytes):
-                continue
-            plen = len(pfx_bytes)
-        if plen > best_plen:
-            best_pi, best_plen = pi, plen
-    if best_pi < 0:
-        return None
-
-    # 去掉前缀
-    remaining = name_bytes[best_plen:]
-
-    # 去掉后缀 (mode 1 中后缀与 prefix index 轮转配对)
-    sfx = suffixes[best_pi] if best_pi < len(suffixes) else ""
-    if sfx not in ("", "+"):
-        sfx_bytes = sfx.encode('utf-8')
-        if remaining.endswith(sfx_bytes):
-            remaining = remaining[:-len(sfx_bytes)]
-
-    # 提取变长部分 (前 vlen*scl 字节)
     expected = vlen * scl
-    if len(remaining) < expected:
-        return None
-    var_bytes = remaining[:expected]
-    if len(var_bytes) != expected:
-        return None
+    indexes = {}
+    for i, entry in enumerate(charset_entries):
+        indexes.setdefault(entry, i)
+    match = None
+    for pi, prefix in enumerate(prefixes):
+        suffix = suffixes[pi % len(suffixes)] if suffixes else ''
+        left = b'' if prefix in ('', '+') else prefix.encode('utf-8')
+        right = b'' if suffix in ('', '+') else suffix.encode('utf-8')
+        if len(name_bytes) != len(left) + expected + len(right):
+            continue
+        if not name_bytes.startswith(left) or not name_bytes.endswith(right):
+            continue
+        value = 0
+        for pos in range(len(left), len(left) + expected, scl):
+            digit = indexes.get(name_bytes[pos:pos + scl])
+            if digit is None:
+                break
+            value = value * len(charset_entries) + digit
+        else:
+            if match is not None:
+                return None  # 同一个名字对应多个前缀，无法安全判断续测位置。
+            match = (pi, value)
+    return match
 
-    # 解码: 每 scl 字节查 charset 索引 (big-endian base-N)
-    n = len(charset_entries)
-    val = 0
-    for i in range(0, expected, scl):
-        chunk = var_bytes[i:i + scl]
-        try:
-            idx = charset_entries.index(chunk)
-        except ValueError:
-            return None
-        val = val * n + idx
 
-    return (best_pi, val)
-
-
-def _read_last_result(result_file: str, out_dir: str = ".") -> str | None:
+def _read_last_result(result_file: str, out_dir: str = ".", *, score_columns=None) -> str | None:
     """读取结果文件最后一行的名字. 引擎写 out/ 前缀.
     名字可能含空格; output_xp=0 行=名字, output_xp=1 行="名字 sc..." (列数随 score_list 可变).
     """
@@ -193,26 +161,12 @@ def _read_last_result(result_file: str, out_dir: str = ".") -> str | None:
             chunk = max(size - 8192, 0)
             f.seek(chunk)
             data = f.read()
-        lines = data.decode("utf-8", errors="replace").splitlines()
+        lines = data.decode("utf-8", errors="replace").split('\n')
         for line in reversed(lines):
-            line = line.strip()
+            line = line.rstrip('\r')
             if not line:
                 continue
-            # output_xp=1: "名字 sc..." → 名字可能含空格, 去掉末尾所有整数 token
-            # (score_list 可只取部分族, 列数不固定; 名字含 '@team', 永不被当整数)
-            rest = line
-            while True:
-                head, sep, tail = rest.rpartition(" ")
-                if not sep:
-                    break
-                try:
-                    int(tail)
-                except ValueError:
-                    break
-                rest = head
-            if rest:
-                return rest  # 名字部分 (可能含空格)
-            return line
+            return _split_trailing_ints(line, score_columns)[0]
         return None
     except Exception as e:
         print(f"[resume] WARNING: 无法读取 {path}: {e}", file=sys.stderr)
@@ -242,7 +196,8 @@ def _try_resume(cfg: dict, result_file: str) -> tuple[dict, str] | None:
     vlen = en.get("variable_length", 0)
 
     # 读最后一行
-    last_name = _read_last_result(result_file)
+    score_columns = len(_plan_families(cfg.get('collection', {}))) if _read_cfg(cfg, 'output.output_xp') else 0
+    last_name = _read_last_result(result_file, score_columns=score_columns)
     if last_name is None:
         print("[resume] 结果文件不存在或为空, 全量开始", file=sys.stderr)
         return None
@@ -332,7 +287,8 @@ def _resolve_result_file(raw: str) -> str:
     其他 → 原样使用
     自动去除前导 out/ (引擎内部已加)
     """
-    raw = raw.strip() if raw else ""
+    _check_result_file(raw)
+    raw = raw.strip()
     if raw == "+":
         resolved = f"result_{uuid.uuid4().hex[:8]}.txt"
     elif raw == "-" or raw == "":
@@ -343,6 +299,27 @@ def _resolve_result_file(raw: str) -> str:
     if resolved.startswith("out/") or resolved.startswith("out\\"):
         resolved = resolved[4:]
     return resolved
+
+
+def _check_result_file(value):
+    if not isinstance(value, str):
+        _die('output.result_file 必须为字符串')
+    _check_name_text('output.result_file', value)
+    from pathlib import PureWindowsPath
+    name = value.strip()
+    if name in ('', '+', '-'):
+        return
+    normalized = name.replace('\\', '/')
+    if normalized.startswith('out/'):
+        normalized = normalized[4:]
+    parts = normalized.split('/')
+    if PureWindowsPath(normalized).drive or any(part in ('', '.', '..') for part in parts):
+        _die('output.result_file 必须是 out/ 下的相对文件路径')
+    if os.name == 'nt' and any(
+            PureWindowsPath(part).is_reserved() or part.endswith((' ', '.'))
+            or any(char in '<>:"|?*' or ord(char) < 32 for char in part)
+            for part in parts):
+        _die('output.result_file 包含 Windows 不允许的文件名或字符')
 
 
 def _print_results(results: list, output_xp: int):
@@ -359,82 +336,155 @@ def _die(msg: str):
     sys.exit(1)
 
 
+_UNSAFE_NAME_CHARS = {'\n': '换行', '\r': '回车', '\t': '制表符', '\0': 'NUL'}
+
+
+def _check_name_text(where: str, value: str) -> None:
+    """拒绝会破坏参数协议/结果文件行结构、且无法转义的字符。"""
+    for char, label in _UNSAFE_NAME_CHARS.items():
+        if char in value:
+            _die(f"{where} 不能包含{label}，否则名字可能截断或破坏结果文件的行结构。"
+                 f"当前值为 {value!r}")
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        _die(f'{where} 包含无法编码为 UTF-8 的字符，当前值为 {value!r}')
+
+
+def _name_byte_lengths(cfg: dict) -> tuple[int, int]:
+    # 按 UTF-8 字节计算；“+”是空前后缀标记，战队名不属于这里的名字长度。
+    if 'format' in cfg:
+        families = cfg['character_sets']
+        variable = sum(families[item['charset']]['single_char_length']
+                       for item in cfg['format'] if isinstance(item, dict))
+        fixed = sum(len(item.encode('utf8')) for item in cfg['format'] if isinstance(item, str))
+    else:
+        variable = cfg['character_set']['single_char_length'] * cfg['enumeration']['variable_length']
+        fixed = 0
+    affixes = sum(max((len(item['name'].encode('utf8')) if item['name'] != '+' else 0
+                      for item in cfg.get(key, [{'name': '+'}])), default=0)
+                  for key in ('prefixes', 'suffixes'))
+    return variable, variable + fixed + affixes
+
+
+def _config_warnings(cfg: dict) -> list[str]:
+    # 提示与硬校验分开：打开编辑器不弹窗，保存或启动时由界面统一提示。
+    messages = []
+    collection = cfg.get('collection', {})
+    if isinstance(collection, dict) and isinstance(collection.get('score_list', ''), (str, list)):
+        if not _plan_families(collection):
+            messages.append('评分族为空，测号文件不会产生任何输出！')
+    try:
+        variable, total = _name_byte_lengths(cfg)
+        if variable > 64 and total <= 256:
+            messages.append(f'随机部分较长（{variable} 字节，超过 64 字节），仍可继续保存和运行。')
+    except (KeyError, TypeError, ValueError):
+        pass  # 不完整配置交给硬校验报告，不用警告掩盖真正的错误。
+    families = cfg.get('character_sets', {}) if 'format' in cfg else {'默认': cfg.get('character_set', {})}
+    if not isinstance(families, dict):
+        return messages
+    for name, cs in families.items():
+        if not isinstance(cs, dict) or type(cs.get('single_char_length')) is not int:
+            continue
+        custom_types = {1: (4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(cs['single_char_length'], (1,))
+        types = cs.get('types', [])
+        if not isinstance(types, list) or not any(kind in custom_types for kind in types):
+            continue
+        custom = cs.get('custom_values', '')
+        if isinstance(custom, list):
+            try:
+                custom = bytes(custom).decode('utf8')
+            except (TypeError, ValueError):
+                messages.append(f'自定义字符中出现非法字符（{name}）：字节列表不是合法的 UTF-8 文本。')
+                continue
+        if not isinstance(custom, str):
+            continue
+        invalid = list(dict.fromkeys(
+            ord(char) for char in custom
+            if char.isspace() or unicodedata.category(char) in ('Cc', 'Cf', 'Cs', 'Cn')
+            or ord(char) in (0x034F, 0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0)
+            or 0xFE00 <= ord(char) <= 0xFE0F or 0xE0100 <= ord(char) <= 0xE01EF))
+        if invalid:
+            codes = '、'.join(f'U+{cp:04X}' for cp in invalid[:8])
+            messages.append(f'自定义字符中出现非法字符（{name}）：{codes}。包含不可见字符或无效 Unicode 字符，请检查。')
+    return messages
+
+
 def _validate_config(cfg: dict):
     """校验配置字段合法性, 不合法立即退出.
 
     使用 CONFIG_MAP 中的 config_path 读取值，发现命名不一致时直接报错。
     """
+    if not isinstance(cfg, dict):
+        _die('配置文件顶层必须为表')
+    if 'format' in cfg or 'character_sets' in cfg:
+        _die('该 Linux 独立版不支持多字符集格式配置')
+    for field in ('enumeration', 'collection', 'output', 'threads'):
+        if not isinstance(cfg.get(field, {}), dict):
+            _die(f'{field} 必须为表')
     # ── debug_mode ──
     dm = _read_cfg(cfg, "debug_mode")
-    if dm not in (0, 1):
+    if type(dm) not in (bool, int) or dm not in (0, 1):
         _die(f"debug_mode 必须为 0 或 1, 当前: {dm}")
 
     # ── team_name ──
     tn = _read_cfg(cfg, "team_name")
     if not tn or not isinstance(tn, str):
         _die("team_name 不能为空")
+    _check_name_text("team_name", tn)
 
     # ── prefixes ──
     pfx = cfg.get("prefixes", [])
     if not isinstance(pfx, list) or not pfx:
         _die("prefixes 至少需要一个元素")
     for i, p in enumerate(pfx):
-        if not isinstance(p.get("name"), str):
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str):
             _die(f"prefixes[{i}].name 必须为字符串")
+        _check_name_text(f"prefixes[{i}].name", p["name"])
 
     # ── suffixes ──
     sfx = cfg.get("suffixes", [])
     if not isinstance(sfx, list) or not sfx:
         _die("suffixes 至少需要一个元素")
     for i, s in enumerate(sfx):
-        if not isinstance(s.get("name"), str):
+        if not isinstance(s, dict) or not isinstance(s.get("name"), str):
             _die(f"suffixes[{i}].name 必须为字符串")
+        _check_name_text(f"suffixes[{i}].name", s["name"])
 
     # ── character_set ──
-    cs = cfg.get("character_set", {})
-    scl = cs.get("single_char_length")
-    if not isinstance(scl, int) or scl < 1:
-        _die(f"character_set.single_char_length 必须为正整数, 当前: {scl}")
-
-    types = cs.get("types", [])
-    if not isinstance(types, list) or not types:
-        _die("character_set.types 至少需要一个类型")
-    scl_type_max = {1: 5, 2: 8, 3: 8, 4: 3}
-    tmax = scl_type_max.get(scl, 2)  # scl >= 5: 1=自定义 2=Unicode区间
-    for t in types:
-        if not isinstance(t, int) or t < 1 or t > tmax:
-            _die(f"character_set.types: scl={scl} 时 type 必须为 1~{tmax}, 当前: {t}")
-
-    custom_types = {1: (4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(scl, (1,))
-    if any(kind in custom_types for kind in types):
-        custom = cs.get("custom_values")
-        if not isinstance(custom, (str, list)):
-            if custom is None:
-                _die("已选择自定义字符，character_set.custom_values 不能为空")
-            _die("character_set.custom_values 必须为字符串或数字列表")
-        if not custom:
-            _die("已选择自定义字符，character_set.custom_values 不能为空")
+    try:
+        validate_charset(cfg.get('character_set'))
+    except ValueError as exc:
+        _die(str(exc))
 
     # ── enumeration ──
     en = cfg.get("enumeration", {})
     mode = en.get("mode")
-    if mode not in (1, 2, 3, 4):
+    if type(mode) is not int or mode not in (1, 2, 3, 4):
         _die(f"enumeration.mode 必须为 1/2/3/4, 当前: {mode}")
 
     vlen = en.get("variable_length")
-    if not isinstance(vlen, int) or vlen < 1:
+    if type(vlen) is not int or vlen < 1:
         _die(f"enumeration.variable_length 必须为正整数, 当前: {vlen}")
+
+    _variable_bytes, name_bytes = _name_byte_lengths(cfg)
+    if name_bytes > 256:
+        _die(f"名字过长：随机部分加固定内容及最长前后缀共 {name_bytes} 字节，不能超过 256 字节。")
 
     ranges = en.get("ranges", [])
     if not isinstance(ranges, list) or not ranges:
         _die("enumeration.ranges 至少需要一个区间")
     for i, r in enumerate(ranges):
+        if not isinstance(r, dict):
+            _die(f'enumeration.ranges[{i}] 必须为表')
         start = r.get("start", 0)
         end = r.get("end", int(1e18))
-        if not isinstance(start, int) or start < 0:
-            _die(f"enumeration.ranges[{i}].start 必须 >= 0, 当前: {start}")
-        if not isinstance(end, int) or (end != -1 and end <= start):
-            _die(f"enumeration.ranges[{i}].end 必须 > start (或 -1=无限), 当前: end={end} start={start}")
+        if type(start) is not int or not 0 <= start < 2**64:
+            _die(f"enumeration.ranges[{i}].start 必须为 0 到 2^64-1 之间的整数，当前为 {start!r}")
+        # end == start 是合法的「空区间」：一个区间测完之后「自动更新 start」正好把
+        # start 推到 end，旧规则此时会让配置变成"无法编辑/无法打开"（end 必须 > start）。
+        if type(end) is not int or (end != -1 and not start <= end < 2**64):
+            _die(f"enumeration.ranges[{i}].end 必须 >= start 且不超过 2^64-1（或填 -1），当前为 {end!r}")
 
     # ── enumeration.prefix_ranges (可选: 按连续段分配前缀区间) ──
     pfx_count = len(cfg.get("prefixes", []))
@@ -444,22 +494,17 @@ def _validate_config(cfg: dict):
             _die("enumeration.prefix_ranges 必须为非空列表")
         total_cnt = 0
         for i, pr in enumerate(pr_cfg):
+            if not isinstance(pr, dict):
+                _die(f'enumeration.prefix_ranges[{i}] 必须为表')
             cnt = pr.get("count")
-            if not isinstance(cnt, int) or cnt < 1:
+            if type(cnt) is not int or cnt < 1:
                 _die(f"enumeration.prefix_ranges[{i}].count 必须为正整数, 当前: {cnt}")
             start = pr.get("start", 0)
             end = pr.get("end", int(1e18))
-            if not isinstance(start, int) or start < 0:
-                _die(f"enumeration.prefix_ranges[{i}].start 必须 >= 0, 当前: {start}")
-            if not isinstance(end, int):
-                _die(f"enumeration.prefix_ranges[{i}].end 必须为整数, 当前: {end}")
-            # end == 0 且 start == 0: 跳过此前缀 (零区间)
-            if end == 0 and start == 0:
-                pass
-            elif end == -1:
-                pass  # 几乎无限 — engine 层会展开
-            elif end <= start:
-                _die(f"enumeration.prefix_ranges[{i}].end 必须 > start (或 0=跳过, -1=无限), 当前: end={end} start={start}")
+            if type(start) is not int or not 0 <= start < 2**64:
+                _die(f"enumeration.prefix_ranges[{i}].start 必须为 0 到 2^64-1 之间的整数，当前为 {start!r}")
+            if type(end) is not int or (end != -1 and not start <= end < 2**64):
+                _die(f"enumeration.prefix_ranges[{i}].end 必须 >= start 且不超过 2^64-1（或填 -1），当前为 {end!r}")
             total_cnt += cnt
         if total_cnt != pfx_count:
             _die(f"enumeration.prefix_ranges count 总和 ({total_cnt}) != prefixes 数量 ({pfx_count})")
@@ -469,13 +514,13 @@ def _validate_config(cfg: dict):
     for mk in ("min_qp", "min_qd", "min_pp", "min_pd", "min_cqd",
                "min_cp", "min_fp", "min_wc", "min_fs", "min_pj"):
         mv = _read_cfg(cfg, f"collection.{mk}")
-        if not isinstance(mv, int) or mv < 0 or mv > 9999:
+        if type(mv) is not int or mv < 0 or mv > 9999:
             _die(f"collection.{mk} 必须为 0~9999, 当前: {mv}")
 
     # 逐族 ptt(potential) 阈值: 仅 SP2 族 cp/fp/wc/fs/pj 有定义
     for pk in ("ptt_cp", "ptt_fp", "ptt_wc", "ptt_fs", "ptt_pj"):
         pv = _read_cfg(cfg, f"collection.{pk}")
-        if not isinstance(pv, int) or pv < 0 or pv > 9999:
+        if type(pv) is not int or pv < 0 or pv > 9999:
             _die(f"collection.{pk} 必须为 0~9999, 当前: {pv}")
 
     # ── collection.score_list / score_mode (限定计算哪些族 + 全算/短路) ──
@@ -512,38 +557,27 @@ def _validate_config(cfg: dict):
                      f"该族不会被计算, ptt 门控将失效")
 
     cm = _read_cfg(cfg, "collection.collect_mode")
-    if cm not in (0, 1, 2):
-        _die(f"collection.collect_mode 必须为 0/1/2, 当前: {cm}")
-
-    if cm == 2:
-        cl = cfg.get("collection", {})
-        st = cl.get("special_thresholds", {})
-        for key, label, vmax in [
-            ("eight_v_min", "八围最低", 999),
-            ("seven_v_min", "七围最低", 999),
-            ("hl_min", "HL 最低", 99),
-            ("hp398_eight_v_min", "HP398 八围最低", 999),
-        ]:
-            v = st.get(key)
-            if v is not None and (not isinstance(v, int) or v < 0 or v > vmax):
-                _die(f"collection.special_thresholds.{key} ({label}) 必须为 0~{vmax}, 当前: {v}")
+    # 旧配置的自定义收集模式仍可打开，运行时按关闭处理。
+    if type(cm) not in (bool, int) or cm not in (0, 1, 2):
+        _die(f"collection.collect_mode 必须为 0 或 1, 当前: {cm}")
 
     # ── output (使用 _read_cfg 统一读取) ──
+    _check_result_file(_read_cfg(cfg, 'output.result_file'))
     ox = _read_cfg(cfg, "output.output_xp")
-    if ox not in (0, 1):
+    if type(ox) not in (bool, int) or ox not in (0, 1):
         _die(f"output.output_xp 必须为 0 或 1, 当前: {ox}")
 
     ol = _read_cfg(cfg, "output.log_output")
-    if ol not in (0, 1):
+    if type(ol) not in (bool, int) or ol not in (0, 1):
         _die(f"output.log_output 必须为 0 或 1, 当前: {ol}")
 
     os_ = _read_cfg(cfg, "output.speed_output")
-    if os_ not in (0, 1):
+    if type(os_) not in (bool, int) or os_ not in (0, 1):
         _die(f"output.speed_output 必须为 0 或 1, 当前: {os_}")
 
     # ── threads (使用 _read_cfg 统一读取) ──
     wt = _read_cfg(cfg, "threads.worker_threads")
-    if not isinstance(wt, int) or wt < -1 or wt == 0 or wt > 256:
+    if type(wt) is not int or wt < -1 or wt == 0 or wt > 256:
         _die(f"threads.worker_threads 必须为 -1(自动) 或 1~256, 当前: {wt}")
 
 
@@ -566,14 +600,15 @@ def _build_task_config(cfg: dict) -> dict:
     特殊字段 (character_set/prefixes/suffixes/ranges) 手工补充。
     """
     en = cfg["enumeration"]
-    cl = cfg["collection"]
-    out_cfg = cfg["output"]
     rng = en.get("ranges", [{}])[0]
 
     # ── 标量字段: 从 CONFIG_MAP 自动生成 ──
     tc: dict = {}
     for fd in CONFIG_MAP:
-        tc[fd.engine_key] = read_config(cfg, fd)
+        value = read_config(cfg, fd)
+        tc[fd.engine_key] = int(value) if isinstance(value, bool) else value
+    if tc["collect_mode"] == 2:
+        tc["collect_mode"] = 0
 
     # ── 手工字段: 需要变换的非标量 ──
     tc["character_set"] = cfg["character_set"]
@@ -629,7 +664,7 @@ def main():
     for _mk in ("qp", "qd", "pp", "pd", "cqd", "cp", "fp", "wc", "fs", "pj"):
         parser.add_argument(f"--min-{_mk}", type=int,
                             help=f"覆盖: collection.min_{_mk}")
-    parser.add_argument("--collect-mode", type=int, choices=[0,1,2], help="覆盖: collection.collect_mode")
+    parser.add_argument("--collect-mode", type=int, choices=[0, 1], help="覆盖: collection.collect_mode")
     parser.add_argument("--output-xp", type=int, choices=[0,1], help="覆盖: output.output_xp")
     parser.add_argument("-o", "--output-file", help="覆盖: output.result_file (+ =随机, - =时间戳, 其他=自定义)")
     parser.add_argument("--output-dest", choices=["file", "stdout", "both"], default=None,
@@ -637,7 +672,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="启用引擎 debug 诊断输出")
     parser.add_argument("--resume", action="store_true", help="断点续测: 从输出文件最后一行继续")
     parser.add_argument("--seed", type=int, help="覆盖: 随机种子 (mode 2/3/4 确定性随机)")
-    parser.add_argument("--scl", type=int, choices=[1,2,3,4], help="覆盖: character_set.single_char_length")
+    parser.add_argument("--scl", type=int, help="覆盖: character_set.single_char_length (1~64)")
     parser.add_argument("--types", help="覆盖: character_set.types (逗号分隔, 如 1,2,3)")
     parser.add_argument("--custom-values", help="覆盖: character_set.custom_values (字符串)")
     args = parser.parse_args()
@@ -646,7 +681,6 @@ def main():
     # main.py is the real-name search entry point. Variant engines such as
     # src/vgen are analysis tools and must not leak in through the shell.
     os.environ.pop("PBB_SRC_DIR", None)
-    engine_bin = ensure_all(rebuild=args.rebuild, verbose=args.debug)
 
     # ── 3. 解析配置文件 ──
     try: import yaml; HAS_YAML = True
@@ -671,97 +705,86 @@ def main():
         print(f"ERROR: 配置文件不存在: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    suffix = os.path.splitext(config_path)[1].lower()
-    if suffix in ('.yaml', '.yml'):
-        if not HAS_YAML: print("ERROR: PyYAML not installed", file=sys.stderr); sys.exit(1)
-        with open(config_path, encoding="utf-8") as f: cfg = yaml.safe_load(f)
-    elif suffix == '.toml':
-        try: import tomllib
-        except ImportError: import tomli as tomllib
-        with open(config_path, "rb") as f: cfg = tomllib.load(f)
-    else:
-        with open(config_path, encoding="utf-8") as f: cfg = json.load(f)
+    config_path = os.path.abspath(config_path)
+    try:
+        suffix = os.path.splitext(config_path)[1].lower()
+        if suffix in ('.yaml', '.yml'):
+            if not HAS_YAML: print("ERROR: PyYAML not installed", file=sys.stderr); sys.exit(1)
+            with open(config_path, encoding="utf-8") as f: cfg = yaml.safe_load(f)
+        elif suffix == '.toml':
+            try: import tomllib
+            except ImportError: import tomli as tomllib
+            with open(config_path, "rb") as f: cfg = tomllib.load(f)
+        else:
+            with open(config_path, encoding="utf-8") as f: cfg = json.load(f)
 
-    # ── 3.5 配置合法性校验 ──
+    except Exception as exc:
+        _die(f'无法读取配置 {config_path}：{exc}')
     _validate_config(cfg)
-
-    # ── 3.6 断点续测 (--resume) ──
-    resume_desc = None
-    resume_temp_file = None
-    if args.resume:
-        rf_raw = cfg.get("output", {}).get("result_file", "result.txt")
-        rf = _resolve_result_file(rf_raw)
-        resumed = _try_resume(cfg, rf)
-        if resumed is not None:
-            new_cfg, resume_desc = resumed
-            # 写临时 YAML 配置文件 (保留原始 config)
-            fd, resume_temp_file = tempfile.mkstemp(suffix=".yaml", prefix="pbb_resume_",
-                                                     dir=os.path.dirname(config_path) or ".")
-            os.close(fd)
-            try:
-                import yaml
-            except ImportError:
-                print("ERROR: PyYAML not installed", file=sys.stderr)
-                sys.exit(1)
-            with open(resume_temp_file, "w", encoding="utf-8") as f:
-                yaml.dump(new_cfg, f, allow_unicode=True, default_flow_style=False)
-            print(f"[resume] 临时配置: {resume_temp_file}", file=sys.stderr)
-            # 使用新配置文件
-            cfg = new_cfg
-            config_path = resume_temp_file
-
-    # ── 4. 组装引擎配置 (CONFIG_MAP 驱动 + CLI 覆盖) ──
-    task_config = _build_task_config(cfg)
-
-    # -1 = 几乎无限 (uint64_t max ≈ 1.8×10^19)
-    if task_config["range_R"] == -1:
-        task_config["range_R"] = 2**64 - 1
-
-    # collect_mode=2: 阈值 (从 CONFIG_MAP 自动包含, 无需手动 add)
-    # 但需确认 collect_mode 一致性
-    if task_config.get("collect_mode") != 2:
-        for k in ("c_eight_v_min", "c_seven_v_min", "c_hl_min", "c_hp398_min"):
-            task_config.pop(k, None)
-
-    # CLI 覆盖 (使用 engine 键名)
-    if args.team:           task_config["team_name"] = args.team
-    if args.mode is not None:    task_config["mode"] = args.mode
-    if args.vlen is not None:    task_config["variable_len"] = args.vlen
-    if args.range_start is not None: task_config["range_L"] = args.range_start
-    if args.range_end is not None:   task_config["range_R"] = args.range_end
-    for _mk in ("qp", "qd", "pp", "pd", "cqd", "cp", "fp", "wc", "fs", "pj"):
-        _mv = getattr(args, f"min_{_mk}")
-        if _mv is not None: task_config[f"min_{_mk}"] = _mv
-    if args.collect_mode is not None: task_config["collect_mode"] = args.collect_mode
-    if args.output_xp is not None: task_config["output_xp"] = args.output_xp
-    if args.debug:             task_config["debug_mode"] = 1
-    if args.seed is not None:  task_config["seed"] = args.seed
-    if args.threads is not None: task_config["n_threads"] = args.threads
-    if args.scl is not None: task_config["character_set"]["single_char_length"] = args.scl
+    overrides = {
+        'team_name': args.team,
+        'debug_mode': 1 if args.debug else None,
+        'enumeration.mode': args.mode,
+        'enumeration.variable_length': args.vlen,
+        'collection.collect_mode': args.collect_mode,
+        'output.output_xp': args.output_xp,
+        'output.result_file': args.output_file,
+        'threads.worker_threads': args.threads,
+        'character_set.single_char_length': args.scl,
+    }
+    for family in ('qp', 'qd', 'pp', 'pd', 'cqd', 'cp', 'fp', 'wc', 'fs', 'pj'):
+        overrides[f'collection.min_{family}'] = getattr(args, f'min_{family}')
+    for field, value in overrides.items():
+        if value is None:
+            continue
+        section, sep, key = field.partition('.')
+        if sep:
+            cfg.setdefault(section, {})[key] = value
+        else:
+            cfg[section] = value
     if args.types is not None:
-        task_config["character_set"]["types"] = [int(x.strip()) for x in args.types.split(",")]
-    if args.custom_values is not None:
-        # 支持字符串和逗号分隔的数字列表 (如 240,159,153)
-        val = args.custom_values
         try:
-            parts = [int(x.strip()) for x in val.split(",")]
-            if len(parts) > 1:
-                task_config["character_set"]["custom_values"] = parts
-            else:
-                task_config["character_set"]["custom_values"] = val
+            cfg['character_set']['types'] = [int(x.strip()) for x in args.types.split(',')]
         except ValueError:
-            task_config["character_set"]["custom_values"] = val
+            _die('--types 需要用逗号分隔的整数，如 1,2,3')
+    if args.custom_values is not None:
+        value = args.custom_values
+        if ',' in value:
+            try:
+                value = [int(x.strip()) for x in value.split(',')]
+            except ValueError:
+                pass
+        cfg['character_set']['custom_values'] = value
+    window = cfg['enumeration']['ranges'][0]
+    if args.range_start is not None:
+        window['start'] = args.range_start
+    if args.range_end is not None:
+        window['end'] = args.range_end
+    _validate_config(cfg)
+    if args.seed is not None and not -1 <= args.seed < 2**64:
+        _die('--seed 必须为 -1 或 0 到 2^64-1 之间的整数')
+    for warning in _config_warnings(cfg):
+        print(f'[main] WARNING: {warning}', file=sys.stderr)
+    if cfg['enumeration']['mode'] == 4 and len(cfg['prefixes']) != len(cfg['suffixes']):
+        print('[main] WARNING: 配对模式的前后缀数量不同，请检查配对。', file=sys.stderr)
+    engine_bin = ensure_all(rebuild=args.rebuild, verbose=args.debug)
+    result_file = _resolve_result_file(_read_cfg(cfg, 'output.result_file'))
+    if args.resume:
+        resumed = _try_resume(cfg, result_file)
+        if resumed is not None:
+            cfg = resumed[0]
+            _validate_config(cfg)
+    task_config = _build_task_config(cfg)
+    if task_config['range_R'] == -1:
+        task_config['range_R'] = 2**64 - 1
+    if args.seed is not None:
+        task_config['seed'] = args.seed
 
     # ── 5. 执行 ──
     n = task_config.get("n_threads", -1)
     if n == -1:
-        n = os.cpu_count() or 4
+        n = min(256, os.cpu_count() or 4)
     task_config["n_threads"] = n
-
-    # 解析输出文件名: 配置文件 → CLI 覆盖
-    result_file = _resolve_result_file(task_config.get("result_file", "result.txt"))
-    if args.output_file is not None:
-        result_file = _resolve_result_file(args.output_file)
 
     # 输出目标: CLI > 默认 file
     output_dest = args.output_dest or "file"
@@ -786,7 +809,7 @@ def main():
     elapsed = time.time() - t0
 
     # ── 6. 输出 ──
-    count = len(result["results"])
+    count = result["found"]
     speed = result["speed"]
     output_xp = task_config["output_xp"]
 
@@ -803,4 +826,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (EngineError, OSError) as exc:
+        _die(str(exc))

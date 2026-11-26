@@ -389,7 +389,8 @@ inline int engine_main(int argc, char** argv) {
             for (char c : sl) { if (c == ',') flush(); else cur += c; }
             flush();
         }
-        if (plan.norder == 0) for (int m = 0; m < M_N; m++) { plan.comp[m] = true; plan.order[plan.norder++] = m; }
+        if (plan.norder == 0)
+            fprintf(stderr, "[engine] WARN: 评分族为空，测号文件不会产生任何输出！\n");
         for (int m = 0; m < M_N; m++) plan.minv[m] = min_[m];
         for (int m = 0; m < M_N; m++) plan.pttv[m] = ptt_[m];
         std::string sm = kv.count("score_mode") ? kv["score_mode"] : "all";
@@ -446,7 +447,7 @@ inline int engine_main(int argc, char** argv) {
                 if (result.sum > l_max_sum) l_max_sum = result.sum;
                 if (result.xp > l_max_xp) l_max_xp = result.xp;
                 if (result.xd > l_max_xd) l_max_xd = result.xd;
-                bool keep = score_output_keep(plan, result, any_gate);
+                bool keep = plan.norder > 0 && score_output_keep(plan, result, any_gate);
                 if (keep) {
                     std::lock_guard<std::mutex> lk(out_mtx);
                     local_found++;

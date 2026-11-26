@@ -97,16 +97,10 @@ CONFIG_MAP: list[FieldDef] = [
     FieldDef("collection.ptt_fs", "ptt_fs", 0),
     FieldDef("collection.ptt_pj", "ptt_pj", 0),
     FieldDef("collection.collect_mode", "collect_mode", 0),
-    # 要计算的评分族 (逗号分隔; 空 ⇒ 全 10 族)。合法 token: qp/qd/pp/pd/cqd/cp/fp/wc/fs/rh/pj
+    # 要计算的评分族 (逗号分隔; 空时不写普通结果)。合法 token: qp/qd/pp/pd/cqd/cp/fp/wc/fs/rh/pj
     FieldDef("collection.score_list", "score_list", ""),
     # all = 全部算完; any = 按 list 顺序遇首个达标即停止后续族计算
     FieldDef("collection.score_mode", "score_mode", "all"),
-
-    # ── collection.special_thresholds (collect_mode=2) ──
-    FieldDef("collection.special_thresholds.eight_v_min", "c_eight_v_min", 0),
-    FieldDef("collection.special_thresholds.seven_v_min", "c_seven_v_min", 0),
-    FieldDef("collection.special_thresholds.hl_min", "c_hl_min", 0),
-    FieldDef("collection.special_thresholds.hp398_eight_v_min", "c_hp398_min", 0),
 
     # ── output ──
     FieldDef("output.output_xp", "output_xp", 1),
@@ -131,9 +125,11 @@ _ENGINE_KEYS_COMPUTED = {
     "scl",
     "charset_len",
     "charset_bytes",
-    # prefix/suffix CSV
+    # 前后缀：逐项编码后的列表，以及旧版 CSV 字符串参数。
     "prefixes",
     "suffixes",
+    "prefixes_hex",
+    "suffixes_hex",
     # range 映射 (由 Python 从 range_L/range_R 写)
     "range_L",
     "range_R",

@@ -8,6 +8,7 @@
 import json
 import os
 from pathlib import Path
+import tempfile
 
 
 def load_config(path, base_dir=None) -> dict:
@@ -22,7 +23,10 @@ def load_config(path, base_dir=None) -> dict:
         path = os.path.join(os.fspath(base_dir), path)
     suffix = os.path.splitext(path)[1].lower()
     if suffix == '.toml':
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
         with open(path, 'rb') as handle:
             cfg = tomllib.load(handle)
     else:
@@ -49,31 +53,36 @@ def save_config(path, cfg) -> None:
     elif suffix == '.toml':
         import tomllib
 
+        def quoted(string):
+            return json.dumps(string, ensure_ascii=False).replace('\x7f', r'\u007F')
+
         def value(item):
             if isinstance(item, bool):
                 return 'true' if item else 'false'
             if isinstance(item, str):
-                return json.dumps(item, ensure_ascii=False)
+                return quoted(item)
             if isinstance(item, (int, float)):
                 return repr(item)
             if isinstance(item, list):
                 return '[' + ', '.join(value(x) for x in item) + ']'
             if isinstance(item, dict):
-                return '{' + ', '.join(json.dumps(k, ensure_ascii=False) + ' = ' + value(v)
+                return '{' + ', '.join(quoted(k) + ' = ' + value(v)
                                        for k, v in item.items()) + '}'
             raise ValueError('TOML 无法保存此类型，请使用 config.yaml。')
-        text = '\n'.join(json.dumps(k, ensure_ascii=False) + ' = ' + value(v)
+        text = '\n'.join(quoted(k) + ' = ' + value(v)
                          for k, v in cfg.items()) + '\n'
         tomllib.loads(text)  # Check serialization before replacing the current file.
     else:
         raise ValueError('请选择 .yaml、.yml、.json 或 .toml 配置文件。')
-    temporary = target.with_suffix(target.suffix + '.tmp')
+    temporary = None
     try:
-        with temporary.open('w', encoding='utf8') as stream:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf8', dir=target.parent,
+                                         prefix='.pbb-config-', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

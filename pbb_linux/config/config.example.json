@@ -92,21 +92,13 @@
     "_comment_ptt": "SP2 族潜在值(potential)阈值: base 换成 63 后该族能达到的理论最高分",
 
     "score_list": "qp,qd,pp,pd,cqd,cp,fp,wc,fs,pj",
-    "_comment_score_list": "要计算哪些评分族(逗号分隔或列表); 留空=全部 10 族, 可选: qp qd pp pd cqd cp fp wc fs(别名 rh) pj",
+    "_comment_score_list": "逗号分隔或列表。留空时不写普通测号结果。可选 qp qd pp pd cqd cp fp wc fs(别名 rh) pj",
 
     "score_mode": "all",
     "_comment_score_mode": "all=全部算完; any=按 score_list 顺序, 遇首个达标族即停止后续计算",
 
     "collect_mode": 1,
-    "_comment_collect": "特殊属性号收集: 0=否 1=破纪录号(out/blue.txt) 2=自定义阈值",
-
-    "special_thresholds": {
-      "_comment": "collect_mode=2 时生效",
-      "eight_v_min": 777,
-      "seven_v_min": 700,
-      "hl_min": 93,
-      "hp398_eight_v_min": 741
-    }
+    "_comment_collect": "特殊属性号收集，0=关闭，1=按预设规则写入 out/blue.txt"
   },
 
   "output": {

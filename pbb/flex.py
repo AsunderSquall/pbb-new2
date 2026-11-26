@@ -16,14 +16,18 @@ def file_bytes(cs):
         raise ValueError('file_format 必须为 lines 或 text')
     entries = text.splitlines() if mode == 'lines' else list(text.replace('\r', '').replace('\n', ''))
     width = cs['single_char_length']
-    if not entries or any(len(x.encode('utf8')) != width or '\0' in x for x in entries):
-        raise ValueError(f'字符集文件 {cs["file"]} 的每个单元须为 {width} 字节，不能为空或含 NUL')
+    if not entries or any(len(x.encode('utf8')) != width or '\0' in x or '\t' in x for x in entries):
+        raise ValueError(f'字符集文件 {cs["file"]} 的每个单元须为 {width} 字节，不能为空或含 NUL、制表符')
     return b''.join(x.encode('utf8') for x in entries)
 
 
 def resolve_files(cfg, config_path):
     """文件引用相对于配置文件；保存到其他目录时仍指向原文件。"""
+    if not isinstance(cfg, dict):
+        raise ValueError('配置文件顶层必须为表，不能是空文档、列表或标量')
     families = cfg.get('character_sets', {})
+    if not isinstance(families, dict):
+        raise ValueError('character_sets 必须为具名字符集字典')
     for cs in families.values():
         if isinstance(cs, dict) and isinstance(cs.get('file'), str):
             path = Path(cs['file'])
@@ -45,8 +49,11 @@ def resume_id(task, template, slots):
 
 def normalize_config(cfg):
     """为格式配置补充旧界面所需字段，返回副本，不改写用户配置。"""
+    if not isinstance(cfg, dict):
+        raise ValueError('配置必须为表')
     if 'format' not in cfg and 'character_sets' not in cfg:
         return cfg
+    from .engine import validate_charset
     families = cfg.get('character_sets')
     fmt = cfg.get('format')
     if not isinstance(families, dict) or not families:
@@ -62,43 +69,18 @@ def normalize_config(cfg):
                 raise ValueError(f'字符集族 {name} 的 file 必须为路径，不能同时指定内置或自定义来源')
             file_bytes(cs)
             continue
-        types = cs.get('types')
-        maximum = {1: 5, 2: 8, 3: 8, 4: 3}.get(width, 2)
-        if not isinstance(types, list) or not types or any(
-                type(t) is not int or not 1 <= t <= maximum for t in types):
-            raise ValueError(f'字符集族 {name} 的 types 不合法')
-        custom_code = {1: (4, 5), 2: (7,), 3: (7,), 4: (2,)}.get(width, (1,))
-        if any(t in custom_code for t in types):
-            custom = cs.get('custom_values')
-            if isinstance(custom, str):
-                data = custom.encode('utf8')
-                # 多字节单字符族不允许把不同宽度的 Unicode 字符拼成伪等宽单元。
-                if width <= 4 and any(len(c.encode('utf8')) != width for c in custom):
-                    raise ValueError(f'字符集族 {name} 含不同字节长度的字符')
-            elif isinstance(custom, list) and all(type(x) is int and 0 <= x <= 255 for x in custom):
-                data = bytes(custom)
-            else:
-                raise ValueError(f'字符集族 {name} 的 custom_values 必须为字符串或字节列表')
-            if not data or len(data) % width or b'\0' in data:
-                raise ValueError(f'字符集族 {name} 必须由非空、等宽且不含 NUL 的单元组成')
-        for interval in cs.get('unicode_ranges', []):
-            if not isinstance(interval, dict):
-                raise ValueError(f'字符集族 {name} 的 Unicode 区间不合法')
-            start, end = interval.get('start'), interval.get('end')
-            if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 0x10ffff:
-                raise ValueError(f'字符集族 {name} 的 Unicode 区间越界')
-            if start <= 0xdfff and end >= 0xd800:
-                raise ValueError('Unicode 区间不能包含代理码点')
-            if len(chr(start).encode('utf8')) != width or len(chr(end).encode('utf8')) != width:
-                raise ValueError(f'字符集族 {name} 的 Unicode 区间必须等宽')
+        validate_charset(cs, f'字符集族 {name}')
     if not isinstance(fmt, list) or not fmt:
         raise ValueError('format 必须为非空列表')
     count, length = 0, 0
     for item in fmt:
         if isinstance(item, str):
-            if '\0' in item:
-                raise ValueError('format 固定字符串不能包含 NUL')
-            length += len(item.encode('utf8'))
+            if any(char in item for char in ('\0', '\r', '\n', '\t')):
+                raise ValueError('format 固定字符串不能包含 NUL、换行、回车或制表符')
+            try:
+                length += len(item.encode('utf8'))
+            except UnicodeError as exc:
+                raise ValueError('format 固定字符串包含无法编码为 UTF-8 的字符') from exc
         elif isinstance(item, dict) and set(item) == {'charset'} and isinstance(item['charset'], str):
             if item['charset'] not in families:
                 raise ValueError(f'format 引用了不存在的字符集族：{item["charset"]}')
@@ -111,15 +93,12 @@ def normalize_config(cfg):
     result = copy.deepcopy(cfg)
     result.setdefault('prefixes', [{'name': '+'}])
     result.setdefault('suffixes', [{'name': '+'}])
-    for p in result['prefixes']:
-        for s in result['suffixes']:
-            affixes = ''.join(x['name'] if x['name'] != '+' else '' for x in (p, s))
-            if '\0' in affixes:
-                raise ValueError('格式加前后缀不能包含 NUL')
-            total = length + len(affixes.encode('utf8'))
-            if total > 256:
-                raise ValueError(f'名字过长：格式加前后缀共 {total} 字节，不能超过 256 字节。')
-    result.setdefault('enumeration', {})['variable_length'] = count
+    if length > 256:
+        raise ValueError(f'名字过长：格式共 {length} 字节，不能超过 256 字节。')
+    enumeration = result.setdefault('enumeration', {})
+    if not isinstance(enumeration, dict):
+        raise ValueError('enumeration 必须为表')
+    enumeration['variable_length'] = count
     result['character_set'] = {'single_char_length': 1, 'types': [1]}
     return result
 

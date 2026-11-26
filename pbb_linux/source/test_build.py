@@ -28,7 +28,7 @@ class BuildSafetyTests(unittest.TestCase):
                     self.assertEqual("-DPBB_ENCODING_COPY=1" in flags, expected)
 
     def test_binary_origin_and_integrity(self):
-        with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory, \
+        with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {"PBB_BUILD_MODE": "native"}):
             binary = os.path.join(directory, "engine.exe")
             with open(binary, "wb") as fh:
@@ -55,7 +55,7 @@ class BuildSafetyTests(unittest.TestCase):
             self.assertEqual(build._detect_simd("cl.exe"), ([], "none"))
 
     def test_portable_binary_can_be_reused_on_another_host(self):
-        with tempfile.TemporaryDirectory(dir=build.BUILD_DIR) as directory, \
+        with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {"PBB_BUILD_MODE": "portable"}):
             binary = os.path.join(directory, "engine.bin")
             with open(binary, "wb") as fh:

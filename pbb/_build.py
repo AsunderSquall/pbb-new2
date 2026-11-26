@@ -54,6 +54,9 @@ def _binary_digest(path):
         return hashlib.file_digest(fh, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(fh.read()).hexdigest()
 
 
+_ENGINE_PROTOCOL_VERSION = 5  # 单条目字符集与连续完成进度。
+
+
 def _record_binary(path, compiler, flags, engine_target=None):
     # 在二进制旁写 <binary>.build.json 二进制清单, 供下次构建判断能否复用。
     # 字段含义:
@@ -65,6 +68,7 @@ def _record_binary(path, compiler, flags, engine_target=None):
     #   digest        二进制内容的 sha256, 用于发现文件被替换或损坏;
     #   compiler/flags 实际使用的编译器与参数(供排查, 不参与复用判定);
     #   engine_target standard / ui, 两个目标变体不可互用;
+    #   engine_protocol 引擎参数协议版本，语义变动时使旧引擎失效;
     #   build_config  本机测速配置签名, 配置一变引擎就必须重建。
     metadata = dict(version=2, mode=_build_mode(), machine=_machine_identity(),
                     platform=[sys.platform, platform.machine()], source=_engine_source_name(),
@@ -72,6 +76,7 @@ def _record_binary(path, compiler, flags, engine_target=None):
     if engine_target is not None:
         # 只有引擎产物才带目标变体与测速签名: pbb_core 是纯桥接层, 与调优开关无关。
         metadata["engine_target"] = engine_target
+        metadata['engine_protocol'] = _ENGINE_PROTOCOL_VERSION
         metadata['build_config'] = _build_config_signature(compiler)
     with open(path + ".build.json", "w", encoding="utf-8") as fh:
         json.dump(metadata, fh, ensure_ascii=True)
@@ -95,7 +100,8 @@ def _binary_is_current(path, engine_target=None):
         compatible = compatible or (metadata.get("mode") == "native" and
                                      metadata.get("machine") == _machine_identity())
         return (metadata.get("version") == 2 and compatible
-                and (engine_target is None or metadata.get("engine_target") == engine_target)
+                and (engine_target is None or (metadata.get("engine_target") == engine_target
+                     and metadata.get('engine_protocol') == _ENGINE_PROTOCOL_VERSION))
                 and metadata.get("source") == _engine_source_name()
                 # 未指定 engine_target 的产物(pbb_core)不参与测速签名的比对。
                 and (engine_target is None or metadata.get('build_config') == _build_config_signature())

@@ -77,8 +77,7 @@ class QpFilterEngineTests(unittest.TestCase):
         task={'team_name':'test','prefixes':[f['name'][:-1]],'suffixes':[''],
               'scl':1,'variable_len':1,'mode':1,'range_L':0,'range_R':1,
               'n_threads':2,'output_xp':1,'output_log':0,'output_speed':0,
-              'score_mode':'all','score_list':'qp,qd','collect_mode':2,'c_eight_v_min':0,
-              'c_seven_v_min':9999,'c_hl_min':9999,'c_hp398_min':9999}
+              'score_mode':'all','score_list':'qp,qd','collect_mode':1}
         for family in ('qp','qd','pp','pd','cqd','cp','fp','wc','fs','pj'):
             task['min_'+family]=0;task['ptt_'+family]=0
         task['min_qp']=1
@@ -89,9 +88,8 @@ class QpFilterEngineTests(unittest.TestCase):
             for ui_target in (False,True):
                 with self.subTest(mode=mode,ui=ui_target):
                     task=self.task();task.update(score_mode=mode,ui_mode=ui_target)
-                    output,blue,stderr=self.execute(task,ui_target)
+                    output,_,stderr=self.execute(task,ui_target)
                     self.assertIn(self.fixture['name']+'@test',output)
-                    self.assertIn(self.fixture['name']+'@test',blue)
                     self.assertIn('found=1 count=1',stderr)
                     if ui_target:self.assertIn('UI_TOP_BEGIN',stderr)
                     else:self.assertNotIn('UI_TOP_BEGIN',stderr)
